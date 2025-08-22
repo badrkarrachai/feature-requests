@@ -1,6 +1,6 @@
 # 🚀 Feature Requests Board
 
-A modern, interactive feature request management system built with Next.js 14 and Supabase. Allow your users to submit, vote on, and track feature requests with a beautiful, responsive interface.
+A modern, interactive feature request management system built with Next.js 14 and Supabase. Allow your users to submit, vote on, and track feature requests with a beautiful, responsive interface and help shape the product future.
 
 ![Feature Requests Demo](https://via.placeholder.com/800x400/4f46e5/ffffff?text=Feature+Requests+Board+Demo)
 
