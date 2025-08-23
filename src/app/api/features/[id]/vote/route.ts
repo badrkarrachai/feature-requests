@@ -5,14 +5,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const { id } = await ctx.params;
   const body = await req.json().catch(() => ({}));
   const { email } = body as { email?: string };
+  const { name } = body as { name?: string };
   if (!email) return NextResponse.json({ error: "email required" }, { status: 400 });
+  if (!name) return NextResponse.json({ error: "name required" }, { status: 400 });
 
-  const { data: existing } = await supabaseAdmin.from("votes").select("id").eq("feature_id", id).eq("email", email).maybeSingle();
+  const { data: existing } = await supabaseAdmin.from("votes").select("id").eq("feature_id", id).eq("email", email).eq("name", name).maybeSingle();
 
   if (existing) {
     await supabaseAdmin.from("votes").delete().eq("id", existing.id);
   } else {
-    const { error } = await supabaseAdmin.from("votes").insert({ feature_id: id, email });
+    const { error } = await supabaseAdmin.from("votes").insert({ feature_id: id, email, name });
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   }
 

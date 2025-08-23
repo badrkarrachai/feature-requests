@@ -60,29 +60,47 @@ export async function GET(req: NextRequest) {
 }
 
 // POST /api/features
-// body: { title, description, email }
+// body: { title, description, email, name }
 export async function POST(req: NextRequest) {
   let body: any = {};
   try {
     body = await req.json();
   } catch {}
 
-  const { title, description, email } = body as {
+  const { title, description, email, name } = body as {
     title?: string;
     description?: string;
     email?: string;
+    name?: string;
   };
 
-  if (!email || !title || !description) {
-    return NextResponse.json({ error: "email, title and description are required" }, { status: 400 });
+  if (!email || !title || !description || !name) {
+    console.log("email, name, title and description are required", email, name, title, description);
+    return NextResponse.json({ error: "email, name, title and description are required" }, { status: 400 });
   }
 
-  const { data, error } = await supabaseAdmin.from("features").insert({ title, description, status: "open", created_by: email }).select("*").single();
+  // Check for existing feature with same title and creator to prevent duplicates
+  const { data: existingFeature } = await supabaseAdmin.from("features").select("id").eq("created_by", email).ilike("title", title.trim()).single();
+
+  if (existingFeature) {
+    return NextResponse.json(
+      {
+        error: "You have already requested a feature with this title. Please use a different title or check your existing requests.",
+      },
+      { status: 409 }
+    ); // 409 Conflict
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("features")
+    .insert({ title, description, status: "open", created_by: email, name: name.trim() })
+    .select("*")
+    .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   // auto-upvote creator; ignore duplicates
-  await supabaseAdmin.from("votes").upsert({ feature_id: data.id, email }, { onConflict: "feature_id,email", ignoreDuplicates: true });
+  await supabaseAdmin.from("votes").upsert({ feature_id: data.id, email, name }, { onConflict: "feature_id,email", ignoreDuplicates: true });
 
   return NextResponse.json({ item: data });
 }

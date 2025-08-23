@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { useState, useEffect } from "react";
 
 export default function NewFeatureModal({
   email,
@@ -19,25 +20,86 @@ export default function NewFeatureModal({
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submittedRequests, setSubmittedRequests] = useState<Set<string>>(new Set());
+
   async function onSubmit(data: FormData) {
     const title = String(data.get("title") || "").trim();
     const description = String(data.get("description") || "").trim();
-    if (!title || !description) return;
-    const res = await fetch("/api/features", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, description, email }),
-    });
-    if (res.ok) onCreated();
+
+    // Create unique request identifier
+    const requestId = `${email}:${title}:${description}`.toLowerCase();
+
+    // Check if this exact request is already being submitted
+    if (submittedRequests.has(requestId)) {
+      return;
+    }
+
+    // Immediate submission lock
+    if (submitting) {
+      return;
+    }
+
+    setSubmitting(true);
+    setSubmittedRequests((prev) => new Set(prev).add(requestId));
+
+    setLoading(true);
+
+    try {
+      if (!title || !description) {
+        alert("Please fill in both title and description");
+        return;
+      }
+
+      const res = await fetch("/api/features", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, description, email, name }),
+      });
+
+      if (res.ok) {
+        onCreated();
+      } else {
+        const errorData = await res.json().catch(() => ({}));
+
+        // Handle duplicate feature requests
+        if (res.status === 409) {
+          alert("You have already requested a feature with this title. Please use a different title or check your existing requests.");
+        } else {
+          alert(errorData.error || "Failed to create feature request. Please try again.");
+        }
+      }
+    } catch (error) {
+      console.error("Network error:", error);
+      alert("Network error. Please check your connection and try again.");
+    } finally {
+      // Reset states with a small buffer to prevent rapid re-submissions
+      setTimeout(() => {
+        setLoading(false);
+        setSubmitting(false);
+        setSubmittedRequests((prev) => {
+          const newSet = new Set(prev);
+          newSet.delete(requestId);
+          return newSet;
+        });
+      }, 500); // 500ms buffer
+    }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+    <Dialog open={open} onOpenChange={(v) => !v && !submitting && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Request a new feature</DialogTitle>
         </DialogHeader>
-        <form action={onSubmit}>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const formData = new FormData(e.currentTarget);
+            onSubmit(formData);
+          }}
+        >
           <div className="mt-4 space-y-3">
             <div className="grid gap-1.5 mb-5">
               <Label htmlFor="title" className="mb-1">
@@ -57,11 +119,18 @@ export default function NewFeatureModal({
             <span className="font-medium text-foreground">{email}</span> stays private and is only used to track your votes and send updates.
           </p>
           <div className="mt-5 flex items-center justify-end gap-2">
-            <Button type="button" size={"lg"} variant="ghost" onClick={onClose}>
+            <Button type="button" size={"lg"} variant="ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </Button>
-            <Button type="submit" size={"lg"} className="text-white">
-              Submit
+            <Button type="submit" size={"lg"} className="text-white" disabled={submitting}>
+              {loading ? (
+                <>
+                  <div className="h-4 w-4 animate-spin rounded-full border border-white border-t-transparent mr-2" />
+                  Submitting
+                </>
+              ) : (
+                "Submit"
+              )}
             </Button>
           </div>
         </form>
