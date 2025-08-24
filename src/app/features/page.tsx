@@ -1,15 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
-import TopBar from "@/components/layout/TopBar";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import FeatureList from "@/components/features/FeatureList";
 import NewFeatureModal from "@/components/features/NewFeatureModal";
+import TopBar from "@/components/layout/TopBar";
 import type { Feature, FeatureFilter, FeatureSort } from "@/types";
 
 // ---- helpers to parse URL params safely
 function parseFilter(v: string | null): FeatureFilter {
-  const allowed: FeatureFilter[] = ["all", "open", "planned", "in_progress", "done", "mine"];
+  const allowed: FeatureFilter[] = ["all", "under_review", "planned", "in_progress", "done", "mine"];
   return (allowed as string[]).includes(v ?? "") ? (v as FeatureFilter) : "all";
 }
 function parseSort(v: string | null): Exclude<FeatureSort, null> {
@@ -17,7 +17,12 @@ function parseSort(v: string | null): Exclude<FeatureSort, null> {
   return (allowed as string[]).includes(v ?? "") ? (v as Exclude<FeatureSort, null>) : "trending";
 }
 
-type ApiPage = { items: Feature[]; page: number; pageSize: number; hasMore: boolean };
+type ApiPage = {
+  items: Feature[];
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+};
 
 // Enhanced Loading Components
 const FeatureCardSkeleton = () => (
@@ -131,7 +136,8 @@ interface EmptyStateProps {
   onOpenNew: () => void;
 }
 
-export default function FeaturesPage() {
+// Wrapper component to handle search params with Suspense
+function FeaturesPageContent() {
   const params = useSearchParams();
   const router = useRouter();
 
@@ -149,6 +155,7 @@ export default function FeaturesPage() {
 
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
 
@@ -163,7 +170,11 @@ export default function FeaturesPage() {
     return list.map((f) => {
       const delta = pendingVotes[f.id] ?? 0;
       if (!delta) return f;
-      return { ...f, votedByMe: !f.votedByMe, votes_count: Math.max(0, f.votes_count + delta) };
+      return {
+        ...f,
+        votedByMe: !f.votedByMe,
+        votes_count: Math.max(0, f.votes_count + delta),
+      };
     });
   }
 
@@ -185,7 +196,9 @@ export default function FeaturesPage() {
 
   // Load a specific page and append/replace
   async function fetchPage(p: number, mode: "replace" | "append") {
-    const res = await fetch(`/api/features?${baseQS}&limit=10&page=${p}`, { cache: "no-store" });
+    const res = await fetch(`/api/features?${baseQS}&limit=10&page=${p}`, {
+      cache: "no-store",
+    });
     if (!res.ok) throw new Error("Failed to load");
     const data: ApiPage = await res.json();
     const newList = withPendingOverlay(data.items || []);
@@ -209,7 +222,26 @@ export default function FeaturesPage() {
     })();
     // reset scroll could be done here if needed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, name, baseQS]); // baseQS changes when q/sort/filter change
+  }, [email, name, sort, filter]); // Only reload on sort/filter changes, not search
+
+  // Handle search queries separately without full loading overlay
+  useEffect(() => {
+    if (!email || !name) return;
+    // Skip if this is the initial load (when items is empty and no search)
+    if (items.length === 0 && q === "") return;
+
+    const performSearch = async () => {
+      setSearching(true);
+      try {
+        await fetchPage(1, "replace");
+      } finally {
+        setSearching(false);
+      }
+    };
+
+    performSearch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]); // Only trigger on search query changes
 
   // intersection observer for infinite scroll
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -252,21 +284,55 @@ export default function FeaturesPage() {
     const delta: 1 | -1 = currentVoted ? -1 : 1;
 
     setPendingVotes((prev) => ({ ...prev, [id]: delta }));
-    setItems((prev) => prev.map((f) => (f.id === id ? { ...f, votedByMe: !currentVoted, votes_count: Math.max(0, f.votes_count + delta) } : f)));
+    setItems((prev) =>
+      prev.map((f) =>
+        f.id === id
+          ? {
+              ...f,
+              votedByMe: !currentVoted,
+              votes_count: Math.max(0, f.votes_count + delta),
+            }
+          : f
+      )
+    );
 
     try {
       const res = await fetch(`/api/features/${id}/vote`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, name }),
+        body: JSON.stringify({
+          email,
+          name,
+          image_url: undefined, // User profile image URL if available
+        }),
       });
       if (!res.ok) {
         // revert on server error
-        setItems((prev) => prev.map((f) => (f.id === id ? { ...f, votedByMe: currentVoted, votes_count: Math.max(0, f.votes_count - delta) } : f)));
+        setItems((prev) =>
+          prev.map((f) =>
+            f.id === id
+              ? {
+                  ...f,
+                  votedByMe: currentVoted,
+                  votes_count: Math.max(0, f.votes_count - delta),
+                }
+              : f
+          )
+        );
       }
     } catch {
       // revert on network error
-      setItems((prev) => prev.map((f) => (f.id === id ? { ...f, votedByMe: currentVoted, votes_count: Math.max(0, f.votes_count - delta) } : f)));
+      setItems((prev) =>
+        prev.map((f) =>
+          f.id === id
+            ? {
+                ...f,
+                votedByMe: currentVoted,
+                votes_count: Math.max(0, f.votes_count - delta),
+              }
+            : f
+        )
+      );
     } finally {
       setPendingVotes((prev) => {
         const { [id]: _, ...rest } = prev;
@@ -287,7 +353,7 @@ export default function FeaturesPage() {
   }
 
   return (
-    <div className="container mx-auto max-w-3xl px-4 py-6">
+    <div className="container mx-auto max-w-3xl px-4 py-6 ">
       <TopBar
         sort={sort}
         filter={filter}
@@ -296,7 +362,9 @@ export default function FeaturesPage() {
         q={q}
         onSearchChange={setQ}
         onOpenNew={() => setOpen(true)}
-        isRefetching={loadingMore && !initialLoading}
+        isRefetching={searching || (loadingMore && !initialLoading)}
+        email={email}
+        name={name}
       />
 
       <div className="">
@@ -306,7 +374,7 @@ export default function FeaturesPage() {
           <>
             {
               <div className="space-y-3">
-                <FeatureList email={email} items={items} onToggleVote={onToggleVote} searchterm={q} onOpenNew={() => setOpen(true)} />
+                <FeatureList items={items} onToggleVote={onToggleVote} searchterm={q} onOpenNew={() => setOpen(true)} />
               </div>
             }
 
@@ -325,6 +393,7 @@ export default function FeaturesPage() {
         open={open}
         onClose={() => setOpen(false)}
         name={name}
+        imageUrl={undefined} // User profile image URL if available
         onCreated={async () => {
           setOpen(false);
           // reload from first page to include the new item
@@ -337,5 +406,22 @@ export default function FeaturesPage() {
         }}
       />
     </div>
+  );
+}
+
+// Main export wrapped with Suspense
+export default function FeaturesPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="container mx-auto max-w-3xl px-4 py-6">
+          <div className="flex items-center justify-center py-8">
+            <div className="text-lg">Loading...</div>
+          </div>
+        </div>
+      }
+    >
+      <FeaturesPageContent />
+    </Suspense>
   );
 }

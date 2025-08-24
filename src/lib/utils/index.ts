@@ -9,15 +9,15 @@ export function truncate(s: string, n = 120) {
 
 /** UI labels to match your screenshot */
 export const STATUS_TEXT: Record<string, string> = {
-  open: "Under Review",
+  under_review: "Under Review",
   planned: "Planned",
   in_progress: "In Progress",
   done: "Complete",
 };
 
 export const STATUS_STYLE: Record<string, string> = {
-  // Open/Under Review - Orange/Amber for attention/action needed
-  open: "border-orange-300 text-orange-800 bg-orange-50",
+  // Under Review - Orange/Amber for attention/action needed
+  under_review: "border-orange-300 text-orange-800 bg-orange-50",
 
   // Planned - Blue for future/planning
   planned: "border-blue-300 text-blue-800 bg-blue-50",

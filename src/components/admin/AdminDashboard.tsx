@@ -1,0 +1,261 @@
+"use client";
+
+import {
+  AlertCircle,
+  ArrowUpRight,
+  BarChart3,
+  CheckCircle,
+  CircleAlert,
+  Clock,
+  FileText,
+  Hourglass,
+  Loader,
+  MessageSquare,
+  Shield,
+  ThumbsUp,
+  TrendingUp,
+  User,
+  Users,
+  XCircle,
+} from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { adminApi } from "@/services/adminApi";
+import type { AdminStats, AdminTabType, AdminUser, FeatureRequest } from "@/types/admin";
+
+interface AdminDashboardProps {
+  currentAdmin: AdminUser;
+  onLogout: () => void;
+  activeTab: AdminTabType;
+  onTabChange: (tab: AdminTabType) => void;
+}
+
+const statusConfig = {
+  under_review: {
+    label: "Under Review",
+    color: "bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-600 ",
+    icon: CircleAlert,
+  },
+  planned: {
+    label: "Planned",
+    color: "bg-blue-50 text-blue-700  dark:bg-blue-900/20 dark:text-blue-500",
+    icon: Clock,
+  },
+  in_progress: {
+    label: "In Progress",
+    color: "bg-purple-50 text-purple-700  dark:bg-purple-900/20 dark:text-purple-500 ",
+    icon: Loader,
+  },
+  done: {
+    label: "Complete",
+    color: "bg-emerald-50 text-emerald-700  dark:bg-emerald-900/20 dark:text-emerald-500",
+    icon: CheckCircle,
+  },
+};
+
+export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange }: AdminDashboardProps) {
+  const [stats, setStats] = useState<AdminStats>({
+    totalFeatures: 0,
+    totalVotes: 0,
+    totalComments: 0,
+    totalAdmins: 0,
+  });
+  const [recentFeatures, setRecentFeatures] = useState<FeatureRequest[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, []);
+
+  const loadDashboardData = async () => {
+    try {
+      setIsLoading(true);
+      const [statsData, featuresData] = await Promise.all([adminApi.getAdminStats(), adminApi.getFeatures({ limit: 5, sort: "new" })]);
+
+      setStats(statsData);
+      setRecentFeatures(featuresData.items);
+    } catch (error) {
+      console.error("Error loading dashboard data:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const statCards = [
+    {
+      label: "Total Features",
+      value: stats.totalFeatures,
+      icon: FileText,
+      color: "blue",
+      textColor: "blue-500",
+      bgColorLight: "blue-50",
+      bgColorDark: "blue-900/20",
+      darkTextColor: "blue-400",
+      trend: "+12%",
+    },
+    {
+      label: "Total Votes",
+      value: stats.totalVotes,
+      icon: TrendingUp,
+      color: "green",
+      bgColorLight: "green-50",
+      bgColorDark: "green-900/20",
+      textColor: "green-600",
+      darkTextColor: "green-500",
+      trend: "+5%",
+    },
+    {
+      label: "Total Comments",
+      value: stats.totalComments,
+      icon: Users,
+      color: "purple",
+      bgColorLight: "purple-50",
+      bgColorDark: "purple-900/20",
+      textColor: "purple-600",
+      darkTextColor: "purple-400",
+      trend: "+8%",
+    },
+    {
+      label: "Admins",
+      value: stats.totalAdmins,
+      icon: Shield,
+      color: "amber",
+      bgColorLight: "amber-50",
+      bgColorDark: "amber-900/20",
+      textColor: "amber-700",
+      darkTextColor: "amber-400",
+    },
+  ];
+
+  const tabs = [
+    { id: "dashboard" as AdminTabType, label: "Dashboard", icon: BarChart3 },
+    { id: "features" as AdminTabType, label: "Features", icon: FileText },
+    { id: "admins" as AdminTabType, label: "Admins", icon: Users },
+  ];
+
+  return (
+    <>
+      {/* Dashboard Content */}
+      <div className="space-y-6 md:space-y-8">
+        {/* Stats Cards */}
+        <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          {statCards.map((stat, index) => (
+            <div key={index} className="bg-card rounded-2xl p-6 border border-border shadow-sm hover:shadow-md transition-shadow">
+              <div className="flex items-center justify-between mb-4">
+                <div className={`w-12 h-12 rounded-xl flex items-center justify-center bg-${stat.bgColorLight} dark:bg-${stat.bgColorDark}`}>
+                  <stat.icon className={`w-6 h-6 text-${stat.textColor} dark:text-${stat.darkTextColor}`} />
+                </div>
+                {stat.trend && (
+                  <span className="text-xs font-medium text-green-600 bg-green-50 dark:bg-green-900/20 dark:text-green-400 px-2 py-1 rounded-full">
+                    {stat.trend}
+                  </span>
+                )}
+              </div>
+              <p className="text-2xl font-bold text-foreground mb-1">{stat.value}</p>
+              <p className="text-sm text-muted-foreground">{stat.label}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Recent Features */}
+        <div className="bg-card rounded-2xl border border-border shadow-sm">
+          <div className="p-4 md:p-6 border-b border-border">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base md:text-lg font-semibold text-foreground">Recent Feature Requests</h2>
+              <button
+                onClick={() => onTabChange("features")}
+                className="text-primary hover:opacity-80 text-xs md:text-sm font-medium flex items-center gap-1 px-2 py-1 md:px-0 md:py-0 rounded md:rounded-none hover:bg-primary/10 transition-colors"
+              >
+                View all
+                <ArrowUpRight className="w-3 h-3 md:w-4 md:h-4" />
+              </button>
+            </div>
+          </div>
+          <div className="divide-y divide-border">
+            {isLoading ? (
+              <div className="p-8 md:p-12 text-center">
+                <div className="animate-spin rounded-full h-6 w-6 md:h-8 md:w-8 border-b-2 border-primary mx-auto mb-3 md:mb-4"></div>
+                <p className="text-sm md:text-base text-muted-foreground">Loading recent features...</p>
+              </div>
+            ) : recentFeatures.length === 0 ? (
+              <div className="p-8 md:p-12 text-center">
+                <FileText className="w-10 h-10 md:w-12 md:h-12 text-muted-foreground mx-auto mb-3 md:mb-4" />
+                <h3 className="text-base md:text-lg font-medium text-foreground mb-2">No features found</h3>
+                <p className="text-sm md:text-base text-muted-foreground">No feature requests have been submitted yet.</p>
+              </div>
+            ) : (
+              recentFeatures.slice(0, 5).map((feature) => {
+                const StatusIcon = statusConfig[feature.status]?.icon || AlertCircle;
+                return (
+                  <div key={feature.id} className="p-4 md:p-6 hover:bg-muted transition-colors">
+                    <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
+                      <div className="flex-1">
+                        <div className=" flex items-start justify-between">
+                          <div>
+                            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-2">
+                              <h3 className="text-base md:text-base lg:text-base font-semibold text-foreground break-words">{feature.title}</h3>
+                              <div
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 md:px-3 md:py-[0.4rem] rounded-full text-xs md:text-sm font-medium self-start sm:self-auto md:hidden ${
+                                  statusConfig[feature.status]?.color
+                                }`}
+                              >
+                                <StatusIcon className="w-3 h-3 md:w-4 md:h-4" />
+                                {statusConfig[feature.status]?.label}
+                              </div>
+                            </div>
+                            <p className="text-xs sm:text-base md:text-base lg:text-sm text-muted-foreground mb-3 line-clamp-2 leading-relaxed">
+                              {feature.description}
+                            </p>
+                          </div>
+                          <div
+                            className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-0.5 md:px-3 md:py-[0.4rem] rounded-full text-xs md:text-sm font-medium self-start sm:self-auto ${
+                              statusConfig[feature.status]?.color
+                            }`}
+                          >
+                            <StatusIcon className="w-3 h-3 md:w-4 md:h-4" />
+                            {statusConfig[feature.status]?.label}
+                          </div>
+                        </div>
+
+                        {/* Metadata - Responsive flex layout */}
+                        <div className="flex flex-wrap gap-2 sm:gap-4 lg:gap-6 text-sm lg:text-base text-muted-foreground">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
+                              <User className="w-4 h-4" />
+                            </div>
+                            <div className="min-w-0">
+                              <span className="truncate block">{feature.author_name}</span>
+                              <span className="truncate block text-xs">{feature.author_email}</span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
+                              <ThumbsUp className="w-4 h-4" />
+                            </div>
+                            <span className="text-xs sm:text-sm">{feature.votes_count} votes</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
+                              <MessageSquare className="w-4 h-4" />
+                            </div>
+                            <span className="text-xs sm:text-sm">{feature.comments_count} comments</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
+                              <Clock className="w-4 h-4" />
+                            </div>
+                            <span className="text-xs sm:text-sm">{new Date(feature.created_at).toLocaleDateString()}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}

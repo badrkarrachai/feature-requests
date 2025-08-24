@@ -1,16 +1,14 @@
 "use client";
 
+import type { Feature } from "@/types";
 import FeatureCard from "./FeatureCard";
-import { Feature } from "@/types";
 
 export default function FeatureList({
-  email,
   items = [],
   onToggleVote,
   searchterm,
   onOpenNew,
 }: {
-  email: string;
   items?: Feature[];
   searchterm: string;
   onOpenNew: () => void;
@@ -62,6 +60,7 @@ export default function FeatureList({
 
           {/* Optional CTA */}
           <button
+            type="button"
             onClick={onOpenNew}
             className="mt-6 px-4 py-2 text-sm font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors duration-200"
           >
@@ -72,12 +71,10 @@ export default function FeatureList({
     );
   }
   return (
-    <>
-      <div className="border-x rounded-b-xl border-b">
-        {items.map((it) => (
-          <FeatureCard showBottomBorder={it != items[items.length - 1]} key={it.id} email={email} item={it} onToggleVote={onToggleVote} />
-        ))}
-      </div>
-    </>
+    <div className="border-x rounded-b-xl border-b">
+      {items.map((it) => (
+        <FeatureCard showBottomBorder={it !== items[items.length - 1]} key={it.id} item={it} onToggleVote={onToggleVote} searchTerm={searchterm} />
+      ))}
+    </div>
   );
 }

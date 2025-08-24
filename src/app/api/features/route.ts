@@ -1,6 +1,7 @@
 // API: GET list (supports q, sort OR filter, pagination) / POST create
-import { NextRequest, NextResponse } from "next/server";
+import { type NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
+import { getUserIdByEmail } from "@/lib/utils/admin";
 
 export const runtime = "nodejs";
 
@@ -10,49 +11,105 @@ export async function GET(req: NextRequest) {
   const email = searchParams.get("email") || "";
   const q = (searchParams.get("q") || "").trim();
 
-  const sort = (searchParams.get("sort") || "") as "trending" | "top" | "new" | "";
-  const filter = (searchParams.get("filter") || "all") as "all" | "open" | "planned" | "in_progress" | "done" | "mine";
+  const sort = (searchParams.get("sort") || "") as
+    | "trending"
+    | "top"
+    | "new"
+    | "";
+  const filter = (searchParams.get("filter") || "all") as
+    | "all"
+    | "open"
+    | "under_review"
+    | "planned"
+    | "in_progress"
+    | "done"
+    | "mine";
 
-  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") || "10", 10), 1), 50);
+  const limit = Math.min(
+    Math.max(parseInt(searchParams.get("limit") || "10", 10), 1),
+    50,
+  );
   const page = Math.max(parseInt(searchParams.get("page") || "1", 10), 1);
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
-  // select with exact count for hasMore
-  let builder = supabaseAdmin.from("features").select("*", { count: "exact" });
+  // Use the features_public view for better performance and author info
+  let builder = supabaseAdmin
+    .from("features_public")
+    .select("*", { count: "exact" });
 
   if (q) builder = builder.or(`title.ilike.%${q}%,description.ilike.%${q}%`);
 
   // filter first
   if (filter === "mine") {
-    if (!email) return NextResponse.json({ items: [], page, total: 0, pageSize: limit, hasMore: false });
-    builder = builder.eq("created_by", email);
+    if (!email)
+      return NextResponse.json({
+        items: [],
+        page,
+        total: 0,
+        pageSize: limit,
+        hasMore: false,
+      });
+    const userId = await getUserIdByEmail(email);
+    if (!userId)
+      return NextResponse.json({
+        items: [],
+        page,
+        total: 0,
+        pageSize: limit,
+        hasMore: false,
+      });
+    builder = builder.eq("user_id", userId);
   } else if (filter !== "all") {
-    builder = builder.eq("status", filter);
+    // Map "open" to "under_review" for backward compatibility with frontend
+    const dbFilter = filter === "open" ? "under_review" : filter;
+    builder = builder.eq("status", dbFilter);
   }
 
   // sort next
   if (sort === "new") {
-    builder = builder.order("created_at", { ascending: false }).order("id", { ascending: false });
+    builder = builder
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false });
   } else if (sort === "top" || sort === "trending") {
-    builder = builder.order("votes_count", { ascending: false }).order("created_at", { ascending: false }).order("id", { ascending: false });
+    builder = builder
+      .order("votes_count", { ascending: false })
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false });
   } else {
     // default (filter-only) recency
-    builder = builder.order("created_at", { ascending: false }).order("id", { ascending: false });
+    builder = builder
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false });
   }
 
   const { data, error, count } = await builder.range(from, to);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error)
+    return NextResponse.json({ error: error.message }, { status: 500 });
 
   // mark voted only for returned page
   const votedMap: Record<string, boolean> = {};
   if (email && data && data.length) {
-    const ids = data.map((f: any) => f.id);
-    const { data: votes } = await supabaseAdmin.from("votes").select("feature_id").eq("email", email).in("feature_id", ids);
-    (votes || []).forEach((v: any) => (votedMap[v.feature_id] = true));
+    const userId = await getUserIdByEmail(email);
+    if (userId) {
+      const ids = data.map((f: { id: string }) => f.id);
+      const { data: votes } = await supabaseAdmin
+        .from("votes")
+        .select("feature_id")
+        .eq("user_id", userId)
+        .in("feature_id", ids);
+      (votes || []).forEach((v: { feature_id: string }) => {
+        votedMap[v.feature_id] = true;
+      });
+    }
   }
 
-  const items = (data || []).map((f: any) => ({ ...f, votedByMe: !!votedMap[f.id] }));
+  const items = (data || []).map(
+    (f: { id: string; [key: string]: unknown }) => ({
+      ...f,
+      votedByMe: !!votedMap[f.id],
+    }),
+  );
   const total = count ?? 0;
   const hasMore = from + items.length < total;
 
@@ -60,47 +117,77 @@ export async function GET(req: NextRequest) {
 }
 
 // POST /api/features
-// body: { title, description, email, name }
+// body: { title, description, email, name, image_url }
 export async function POST(req: NextRequest) {
-  let body: any = {};
-  try {
-    body = await req.json();
-  } catch {}
-
-  const { title, description, email, name } = body as {
+  let body: {
     title?: string;
     description?: string;
     email?: string;
     name?: string;
+    image_url?: string;
+  } = {};
+  try {
+    body = await req.json();
+  } catch {}
+
+  const { title, description, email, name, image_url } = body as {
+    title?: string;
+    description?: string;
+    email?: string;
+    name?: string;
+    image_url?: string;
   };
 
   if (!email || !title || !description || !name) {
-    console.log("email, name, title and description are required", email, name, title, description);
-    return NextResponse.json({ error: "email, name, title and description are required" }, { status: 400 });
-  }
-
-  // Check for existing feature with same title and creator to prevent duplicates
-  const { data: existingFeature } = await supabaseAdmin.from("features").select("id").eq("created_by", email).ilike("title", title.trim()).single();
-
-  if (existingFeature) {
+    console.log(
+      "email, name, title and description are required",
+      email,
+      name,
+      title,
+      description,
+    );
     return NextResponse.json(
-      {
-        error: "You have already requested a feature with this title. Please use a different title or check your existing requests.",
-      },
-      { status: 409 }
-    ); // 409 Conflict
+      { error: "email, name, title and description are required" },
+      { status: 400 },
+    );
   }
 
-  const { data, error } = await supabaseAdmin
-    .from("features")
-    .insert({ title, description, status: "open", created_by: email, name: name.trim() })
-    .select("*")
-    .single();
+  // Use the create_feature RPC function which handles user creation and feature creation
+  const { data: feature, error } = await supabaseAdmin.rpc("create_feature", {
+    p_email: email.toLowerCase(),
+    p_name: name.trim().toLowerCase(),
+    p_image_url: image_url || null,
+    p_title: title.trim(),
+    p_description: description.trim(),
+  });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    // Handle unique constraint violation
+    if (
+      error.code === "23505" ||
+      error.message?.includes("duplicate key value") ||
+      error.message?.includes("unique constraint")
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "You have already requested a feature with this title. Please use a different title or check your existing requests.",
+        },
+        { status: 409 },
+      );
+    }
+    console.error("Error creating feature:", error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 
-  // auto-upvote creator; ignore duplicates
-  await supabaseAdmin.from("votes").upsert({ feature_id: data.id, email, name }, { onConflict: "feature_id,email", ignoreDuplicates: true });
+  if (!feature) {
+    return NextResponse.json(
+      { error: "Failed to create feature" },
+      { status: 500 },
+    );
+  }
 
-  return NextResponse.json({ item: data });
+  // The create_feature RPC already handles auto-upvoting by the creator, so no need to do it manually
+
+  return NextResponse.json({ item: feature });
 }
