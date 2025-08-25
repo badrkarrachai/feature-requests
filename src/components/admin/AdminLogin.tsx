@@ -123,7 +123,7 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
             <button
               type="submit"
               disabled={isLoading}
-              className="w-full bg-primary text-primary-foreground py-3 px-4 rounded-xl font-medium hover:opacity-90 focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-all shadow-lg disabled:opacity-50 text-white"
+              className="w-full bg-primary py-3 px-4 rounded-xl font-medium hover:opacity-90 focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-all shadow-lg disabled:opacity-50 text-white"
             >
               {isLoading ? "Signing In..." : "Sign In"}
             </button>

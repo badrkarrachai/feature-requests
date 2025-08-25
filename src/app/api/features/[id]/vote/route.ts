@@ -1,11 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
 
-export async function POST(
-  req: NextRequest,
-  { params }: { params: { id: string } },
-) {
-  const { id } = await params;
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const { id } = await ctx.params;
   const body = await req.json().catch(() => ({}));
   const { email, name, image_url } = body as {
     email?: string;
@@ -13,10 +10,8 @@ export async function POST(
     image_url?: string;
   };
 
-  if (!email)
-    return NextResponse.json({ error: "email required" }, { status: 400 });
-  if (!name)
-    return NextResponse.json({ error: "name required" }, { status: 400 });
+  if (!email) return NextResponse.json({ error: "email required" }, { status: 400 });
+  if (!name) return NextResponse.json({ error: "name required" }, { status: 400 });
 
   // Use the toggle_vote RPC function which handles user creation and vote toggling
   const { data: action, error } = await supabaseAdmin.rpc("toggle_vote", {
@@ -32,11 +27,7 @@ export async function POST(
   }
 
   // Get the updated feature to return the current vote count
-  const { data: feature } = await supabaseAdmin
-    .from("features")
-    .select("votes_count")
-    .eq("id", id)
-    .single();
+  const { data: feature } = await supabaseAdmin.from("features").select("votes_count").eq("id", id).single();
 
   if (!feature) {
     return NextResponse.json({ error: "Feature not found" }, { status: 404 });

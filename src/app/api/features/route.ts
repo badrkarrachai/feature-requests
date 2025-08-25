@@ -11,34 +11,30 @@ export async function GET(req: NextRequest) {
   const email = searchParams.get("email") || "";
   const q = (searchParams.get("q") || "").trim();
 
-  const sort = (searchParams.get("sort") || "") as
-    | "trending"
-    | "top"
-    | "new"
-    | "";
-  const filter = (searchParams.get("filter") || "all") as
-    | "all"
-    | "open"
-    | "under_review"
-    | "planned"
-    | "in_progress"
-    | "done"
-    | "mine";
+  const sort = (searchParams.get("sort") || "") as "trending" | "top" | "new" | "";
+  const filter = (searchParams.get("filter") || "all") as "all" | "open" | "under_review" | "planned" | "in_progress" | "done" | "mine";
 
-  const limit = Math.min(
-    Math.max(parseInt(searchParams.get("limit") || "10", 10), 1),
-    50,
-  );
+  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") || "10", 10), 1), 50);
   const page = Math.max(parseInt(searchParams.get("page") || "1", 10), 1);
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
   // Use the features_public view for better performance and author info
-  let builder = supabaseAdmin
-    .from("features_public")
-    .select("*", { count: "exact" });
+  let builder = supabaseAdmin.from("features_public").select("*", { count: "exact" });
 
-  if (q) builder = builder.or(`title.ilike.%${q}%,description.ilike.%${q}%`);
+  if (q) {
+    // Split query into words and create search conditions for each word
+    const searchTerms = q.split(/\s+/).filter((term) => term.length > 0);
+    if (searchTerms.length > 0) {
+      const searchConditions = searchTerms
+        .map((term) => {
+          const searchTerm = `%${term}%`;
+          return `title.ilike.${searchTerm},description.ilike.${searchTerm},author_name.ilike.${searchTerm}`;
+        })
+        .join(",");
+      builder = builder.or(searchConditions);
+    }
+  }
 
   // filter first
   if (filter === "mine") {
@@ -68,24 +64,16 @@ export async function GET(req: NextRequest) {
 
   // sort next
   if (sort === "new") {
-    builder = builder
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false });
+    builder = builder.order("created_at", { ascending: false }).order("id", { ascending: false });
   } else if (sort === "top" || sort === "trending") {
-    builder = builder
-      .order("votes_count", { ascending: false })
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false });
+    builder = builder.order("votes_count", { ascending: false }).order("created_at", { ascending: false }).order("id", { ascending: false });
   } else {
     // default (filter-only) recency
-    builder = builder
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false });
+    builder = builder.order("created_at", { ascending: false }).order("id", { ascending: false });
   }
 
   const { data, error, count } = await builder.range(from, to);
-  if (error)
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   // mark voted only for returned page
   const votedMap: Record<string, boolean> = {};
@@ -93,23 +81,17 @@ export async function GET(req: NextRequest) {
     const userId = await getUserIdByEmail(email);
     if (userId) {
       const ids = data.map((f: { id: string }) => f.id);
-      const { data: votes } = await supabaseAdmin
-        .from("votes")
-        .select("feature_id")
-        .eq("user_id", userId)
-        .in("feature_id", ids);
+      const { data: votes } = await supabaseAdmin.from("votes").select("feature_id").eq("user_id", userId).in("feature_id", ids);
       (votes || []).forEach((v: { feature_id: string }) => {
         votedMap[v.feature_id] = true;
       });
     }
   }
 
-  const items = (data || []).map(
-    (f: { id: string; [key: string]: unknown }) => ({
-      ...f,
-      votedByMe: !!votedMap[f.id],
-    }),
-  );
+  const items = (data || []).map((f: { id: string; [key: string]: unknown }) => ({
+    ...f,
+    votedByMe: !!votedMap[f.id],
+  }));
   const total = count ?? 0;
   const hasMore = from + items.length < total;
 
@@ -139,17 +121,8 @@ export async function POST(req: NextRequest) {
   };
 
   if (!email || !title || !description || !name) {
-    console.log(
-      "email, name, title and description are required",
-      email,
-      name,
-      title,
-      description,
-    );
-    return NextResponse.json(
-      { error: "email, name, title and description are required" },
-      { status: 400 },
-    );
+    console.log("email, name, title and description are required", email, name, title, description);
+    return NextResponse.json({ error: "email, name, title and description are required" }, { status: 400 });
   }
 
   // Use the create_feature RPC function which handles user creation and feature creation
@@ -163,17 +136,12 @@ export async function POST(req: NextRequest) {
 
   if (error) {
     // Handle unique constraint violation
-    if (
-      error.code === "23505" ||
-      error.message?.includes("duplicate key value") ||
-      error.message?.includes("unique constraint")
-    ) {
+    if (error.code === "23505" || error.message?.includes("duplicate key value") || error.message?.includes("unique constraint")) {
       return NextResponse.json(
         {
-          error:
-            "You have already requested a feature with this title. Please use a different title or check your existing requests.",
+          error: "You have already requested a feature with this title. Please use a different title or check your existing requests.",
         },
-        { status: 409 },
+        { status: 409 }
       );
     }
     console.error("Error creating feature:", error);
@@ -181,10 +149,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (!feature) {
-    return NextResponse.json(
-      { error: "Failed to create feature" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Failed to create feature" }, { status: 500 });
   }
 
   // The create_feature RPC already handles auto-upvoting by the creator, so no need to do it manually

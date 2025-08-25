@@ -1263,3 +1263,248 @@ begin
   end if;
 end $$;
 
+
+
+
+
+
+-- ==========================================
+-- SUPABASE TRENDS SYSTEM (Full, Fixed)
+-- ==========================================
+-- - Keeps history (unique per metric + window)
+-- - Robust % change (symmetric fallback when previous=0)
+-- - 7 FULL local days windows (Africa/Casablanca), half-open [start, end)
+-- - RLS read-only exposure, hardened view (security_invoker + security_barrier)
+-- - Hourly pg_cron job (idempotent), plus initial run
+-- ==========================================
+
+-- 0) Extensions (no-op if present)
+create extension if not exists pgcrypto;
+create extension if not exists pg_cron;
+
+-- 1) Trends table (+ constraints & indexes)
+create table if not exists public.trends (
+  id              uuid primary key default gen_random_uuid(),
+  metric_name     text         not null,
+  current_value   integer      not null,
+  previous_value  integer      not null,
+  trend_percent   numeric(7,2) not null,
+  period_start    timestamptz  not null,
+  period_end      timestamptz  not null,
+  computed_at     timestamptz  not null default now(),
+  constraint trends_period_nonempty check (period_end > period_start)
+);
+
+-- Unique per metric+window → safe upserts
+create unique index if not exists trends_metric_window_uq
+  on public.trends (metric_name, period_start, period_end);
+
+-- Common read-path indexes
+create index if not exists trends_metric_computed_desc_idx
+  on public.trends (metric_name, computed_at desc);
+
+create index if not exists trends_period_end_idx
+  on public.trends (period_end desc);
+
+comment on table public.trends is
+  'Historical metric snapshots for UI analytics (7-day rolling windows, local-time aligned).';
+
+-- 2) Best-practice % change with symmetric fallback when previous = 0
+create or replace function public.calculate_trend_percentage(
+  p_current  integer,
+  p_previous integer
+) returns numeric(7,2)
+language plpgsql
+immutable
+as $$
+declare
+  num numeric;
+begin
+  if coalesce(p_current,0) = 0 and coalesce(p_previous,0) = 0 then
+    return 0.00;
+  end if;
+
+  if p_previous = 0 then
+    num := 200.0 * (p_current::numeric - p_previous::numeric)
+                / nullif(p_current::numeric + p_previous::numeric, 0);
+    return round(num, 2);
+  end if;
+
+  return round(((p_current - p_previous)::numeric / p_previous::numeric) * 100, 2);
+end;
+$$;
+
+comment on function public.calculate_trend_percentage(integer, integer)
+  is 'Returns percent change; falls back to symmetric % when previous=0 to avoid divide-by-zero/infinite values.';
+
+-- 3) Helpful read indexes on source tables
+-- (Skip if you already have them)
+create index if not exists features_created_at_idx on public.features (created_at);
+create index if not exists votes_created_at_idx    on public.votes    (created_at);
+create index if not exists comments_created_at_idx on public.comments (created_at);
+
+-- 4) Entrypoint: recompute last 7 FULL local days and upsert
+create or replace function public.refresh_trends(retention_days integer default 365)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  tz text := 'Africa/Casablanca';
+  now_utc           timestamptz := now();
+  local_now         timestamp;
+  local_today_start timestamp;
+
+  current_start   timestamptz;
+  current_end     timestamptz;
+  previous_start  timestamptz;
+  previous_end    timestamptz;
+
+  cur_features    integer;
+  prv_features    integer;
+  cur_votes       integer;
+  prv_votes       integer;
+  cur_comments    integer;
+  prv_comments    integer;
+
+  tr_features     numeric(7,2);
+  tr_votes        numeric(7,2);
+  tr_comments     numeric(7,2);
+begin
+  -- Anchor to local midnight so we compare FULL days only
+  local_now := now_utc AT TIME ZONE tz;
+  local_today_start := date_trunc('day', local_now);
+
+  current_end   := local_today_start AT TIME ZONE tz;                -- [start, end)
+  current_start := (local_today_start - interval '7 days') AT TIME ZONE tz;
+
+  previous_end   := current_start;
+  previous_start := previous_end - interval '7 days';
+
+  -- Current window counts
+  select count(*) into cur_features from public.features
+   where created_at >= current_start and created_at < current_end;
+
+  select count(*) into cur_votes from public.votes
+   where created_at >= current_start and created_at < current_end;
+
+  select count(*) into cur_comments from public.comments
+   where created_at >= current_start and created_at < current_end;
+
+  -- Previous window counts
+  select count(*) into prv_features from public.features
+   where created_at >= previous_start and created_at < previous_end;
+
+  select count(*) into prv_votes from public.votes
+   where created_at >= previous_start and created_at < previous_end;
+
+  select count(*) into prv_comments from public.comments
+   where created_at >= previous_start and created_at < previous_end;
+
+  -- Trend math
+  tr_features := public.calculate_trend_percentage(cur_features, prv_features);
+  tr_votes    := public.calculate_trend_percentage(cur_votes,    prv_votes);
+  tr_comments := public.calculate_trend_percentage(cur_comments, prv_comments);
+
+  -- Upsert per metric (idempotent for the window)
+  insert into public.trends (metric_name, current_value, previous_value, trend_percent, period_start, period_end)
+  values
+    ('total_features', cur_features, prv_features, tr_features, current_start, current_end),
+    ('total_votes',    cur_votes,    prv_votes,    tr_votes,    current_start, current_end),
+    ('total_comments', cur_comments, prv_comments, tr_comments, current_start, current_end)
+  on conflict (metric_name, period_start, period_end)
+  do update set
+    current_value  = excluded.current_value,
+    previous_value = excluded.previous_value,
+    trend_percent  = excluded.trend_percent,
+    computed_at    = now();
+
+  -- Housekeeping: keep only the last N days of history
+  delete from public.trends
+  where period_end < (now_utc - make_interval(days => retention_days));
+end;
+$$;
+
+comment on function public.refresh_trends(integer)
+  is 'Recompute last 7 FULL local days, upsert per metric window, purge rows older than retention_days.';
+
+-- 5) Hardened view for UI (invoker semantics + barrier)
+create or replace view public.trends_latest
+  with (security_invoker = true, security_barrier = true) as
+with ranked as (
+  select t.id,
+         t.metric_name,
+         t.current_value,
+         t.previous_value,
+         t.trend_percent,
+         t.period_start,
+         t.period_end,
+         t.computed_at,
+         row_number() over (
+           partition by t.metric_name
+           order by t.period_end desc, t.computed_at desc
+         ) as rn
+  from public.trends t
+)
+select id, metric_name, current_value, previous_value, trend_percent,
+       period_start, period_end, computed_at
+from ranked
+where rn = 1;
+
+-- Optional helper for API
+create or replace function public.get_latest_trends()
+returns table (
+  metric_name    text,
+  current_value  integer,
+  previous_value integer,
+  trend_percent  numeric(7,2),
+  period_start   timestamptz,
+  period_end     timestamptz,
+  computed_at    timestamptz
+) language sql stable as $$
+  select metric_name, current_value, previous_value, trend_percent,
+         period_start, period_end, computed_at
+  from public.trends_latest
+  order by metric_name;
+$$;
+
+-- 6) RLS: read-only exposure for clients
+alter table public.trends enable row level security;
+
+-- CREATE POLICY does not support IF NOT EXISTS → use drop+create idempotently
+drop policy if exists trends_read_all on public.trends;
+create policy trends_read_all on public.trends
+  for select
+  using (true);
+
+-- Grants (adjust to your roles as needed)
+grant select on public.trends            to anon, authenticated;
+grant select on public.trends_latest     to anon, authenticated;
+grant execute on function public.get_latest_trends() to anon, authenticated;
+-- Note: refresh_trends() is SECURITY DEFINER; called via pg_cron below.
+-- You can omit granting it to anon/authenticated.
+
+-- 7) pg_cron: idempotent hourly job at minute 7 (UTC)
+--    Safe quoting with dollar-tags; no DO-block quoting conflicts.
+create extension if not exists pg_cron;
+
+-- Remove existing job (if any)
+select cron.unschedule(jobid)
+from cron.job
+where jobname = 'trends_hourly';
+
+-- Create fresh job
+select cron.schedule(
+  'trends_hourly',
+  '7 * * * *',
+  $job$SELECT public.refresh_trends();$job$
+);
+
+-- 8) Seed once so UI has data immediately
+select public.refresh_trends();
+
+-- 9) Quick checks (optional)
+-- select jobid, jobname, schedule, command from cron.job where jobname='trends_hourly';
+-- select * from public.trends_latest order by metric_name;
+-- select * from public.trends order by period_end desc, metric_name;

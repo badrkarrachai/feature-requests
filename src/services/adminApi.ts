@@ -331,6 +331,68 @@ class AdminApi {
       };
     }
   }
+
+  // Trends
+  async getTrends(): Promise<{
+    trends: {
+      total_features?: {
+        current: number;
+        previous: number;
+        percentage: number;
+        calculatedAt: string;
+        periodStart: string;
+        periodEnd: string;
+      };
+      total_votes?: {
+        current: number;
+        previous: number;
+        percentage: number;
+        calculatedAt: string;
+        periodStart: string;
+        periodEnd: string;
+      };
+      total_comments?: {
+        current: number;
+        previous: number;
+        percentage: number;
+        calculatedAt: string;
+        periodStart: string;
+        periodEnd: string;
+      };
+    };
+    lastCalculated: string | null;
+  }> {
+    try {
+      const response = await fetch("/api/trends", {
+        headers: this.getAuthHeaders(),
+      });
+
+      if (!response.ok) {
+        console.error("Error fetching trends:", response.statusText);
+        return { trends: {}, lastCalculated: null };
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      console.error("Error fetching trends:", error);
+      return { trends: {}, lastCalculated: null };
+    }
+  }
+
+  async triggerTrendCalculation(): Promise<boolean> {
+    try {
+      const response = await fetch("/api/trends", {
+        method: "POST",
+        headers: this.getAuthHeaders(),
+      });
+
+      return response.ok;
+    } catch (error) {
+      console.error("Error triggering trend calculation:", error);
+      return false;
+    }
+  }
 }
 
 // Make the AdminApi class available globally for debugging

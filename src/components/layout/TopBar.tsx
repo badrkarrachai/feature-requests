@@ -98,7 +98,7 @@ export default function TopBar(props: {
   name?: string;
 }) {
   const [search, setSearch] = useState(props.q);
-  const [isSearching, setIsSearching] = useState(false);
+  const [isSearching, setIsSearching] = useState(!!props.q && props.q.trim() !== "");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [isLoadingNotifications, setIsLoadingNotifications] = useState(true);
@@ -114,8 +114,7 @@ export default function TopBar(props: {
   useEffect(() => {
     const t = setTimeout(() => props.onSearchChange(search), 300);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search]);
+  }, [search, props.onSearchChange]);
 
   // Load notifications on mount and when email/name changes
   useEffect(() => {
@@ -312,16 +311,15 @@ export default function TopBar(props: {
               )}
 
               {/* Clear button - only show if there's text */}
-              {search && (
-                <button
-                  onClick={closeSearch}
-                  className="p-1 rounded-full hover:bg-gray-100 transition-colors flex-shrink-0"
-                  title="Clear search"
-                  type="button"
-                >
-                  <X size={16} className="text-muted-foreground hover:text-foreground" />
-                </button>
-              )}
+
+              <button
+                onClick={closeSearch}
+                className="p-1 rounded-full hover:bg-gray-100 transition-colors flex-shrink-0"
+                title="Clear search"
+                type="button"
+              >
+                <X size={16} className="text-muted-foreground hover:text-foreground" />
+              </button>
             </div>
           </div>
         )}
@@ -383,15 +381,11 @@ export default function TopBar(props: {
                             <div className="flex items-start justify-between gap-2">
                               <div className="flex-1 min-w-0">
                                 <p className={`text-sm font-medium truncate  ${!notification.read ? "text-foreground" : "text-muted-foreground"}`}>
-                                  {highlightSearchText(notification.title, props.q)}
+                                  {notification.title}
                                 </p>
                                 <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                                   {`${notification.message.charAt(0).toUpperCase()}${notification.message.slice(1)} `}
-                                  {notification.feature_title ? (
-                                    <span className="font-medium">{highlightSearchText(notification.feature_title, props.q)}</span>
-                                  ) : (
-                                    ""
-                                  )}
+                                  {notification.feature_title ? <span className="font-medium">{notification.feature_title}</span> : ""}
                                 </p>
                                 <p className="text-xs text-muted-foreground mt-1">{formatTimestamp(notification.created_at)}</p>
                               </div>

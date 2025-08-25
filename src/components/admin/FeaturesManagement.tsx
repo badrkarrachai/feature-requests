@@ -20,6 +20,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { adminApi } from "@/services/adminApi";
 import type { FeatureRequest } from "@/types/admin";
 import useDebounce from "@/hooks/useDebounce";
+import { formatCount } from "@/lib/utils/numbers";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,13 +36,32 @@ import {
 } from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 
+// Types for better type safety
+type SortOption = "new" | "trending" | "top";
+type FilterOption = "all" | "open" | "under_review" | "planned" | "in_progress" | "done" | "mine";
+
+interface LoadingState {
+  initial: boolean;
+  more: boolean;
+  search: boolean;
+}
+
+interface SearchState {
+  query: string;
+  filter: FilterOption;
+  sort: SortOption;
+}
+
 // Utility function to highlight search terms in text
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-export function highlightSearchText(text: string, query: string): React.ReactNode {
-  const q = query.trim();
-  if (!q) return text;
+export function highlightSearchText(text: string, query: string, shouldHighlight: boolean = true): React.ReactNode {
+  // Only highlight if explicitly enabled and there's a valid query
+  if (!shouldHighlight || !query || !query.trim()) {
+    return text;
+  }
 
+  const q = query.trim();
   // Support multiple words: "table sort" -> /(table|sort)/gi
   const terms = Array.from(new Set(q.split(/\s+/)))
     .filter(Boolean)
@@ -117,70 +137,280 @@ const sortConfig = {
 };
 
 export function FeaturesManagement() {
+  // Core state
   const [features, setFeatures] = useState<FeatureRequest[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [sortBy, setSortBy] = useState<"trending" | "top" | "new">("new");
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSearching, setIsSearching] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [isUpdating, setIsUpdating] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [featureToDelete, setFeatureToDelete] = useState<{ id: string; title: string } | null>(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const [totalCount, setTotalCount] = useState(0);
 
-  // Debounce search query to avoid excessive API calls
+  // Smart caching for search results
+  const [searchCache, setSearchCache] = useState<
+    Record<
+      string,
+      {
+        features: FeatureRequest[];
+        page: number;
+        hasMore: boolean;
+        totalCount: number;
+        timestamp: number;
+      }
+    >
+  >({});
+  const [currentSearchKey, setCurrentSearchKey] = useState<string>("default");
+
+  // Search and filter state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<FilterOption>("all");
+  const [sortBy, setSortBy] = useState<SortOption>("new");
+
+  // Loading states
+  const [loading, setLoading] = useState<LoadingState>({
+    initial: true,
+    more: false,
+    search: false,
+  });
+
+  // Smart highlighting - only highlight after search results are loaded
+  const [lastSearchTerm, setLastSearchTerm] = useState("");
+  const [shouldHighlight, setShouldHighlight] = useState(false);
+
+  // Request tracking for race condition protection
+  const requestIdRef = useRef(0);
+
+  // Other UI state
+  const [error, setError] = useState<string | null>(null);
+  const [isUpdating, setIsUpdating] = useState<string | null>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [featureToDelete, setFeatureToDelete] = useState<{ id: string; title: string } | null>(null);
+
+  // Refs
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const loadingRef = useRef(false);
+  const searchStateRef = useRef<SearchState>({
+    query: "",
+    filter: "all",
+    sort: "new",
+  });
+
+  // Debounce search query - consistent with frontend
   const debouncedSearchQuery = useDebounce(searchQuery, 300);
 
-  const loadFeatures = useCallback(
-    async (pageNum: number = 1, mode: "replace" | "append" = "replace") => {
-      try {
-        // Only show search loading if there's an active search and replacing
-        if (debouncedSearchQuery.trim().length > 0 && mode === "replace") {
-          setIsSearching(true);
-        } else if (mode === "replace") {
-          setIsLoading(true);
-        } else {
-          setLoadingMore(true);
-        }
+  // Generate search key for caching
+  const getSearchKey = useCallback((query: string, filter: FilterOption, sort: SortOption) => {
+    return `${query || "empty"}|${filter}|${sort}`;
+  }, []);
 
-        setError(null);
+  // Get cached results for a search key
+  const getCachedResults = useCallback(
+    (searchKey: string) => {
+      const cached = searchCache[searchKey];
+      if (!cached) return null;
+
+      // Cache expires after 5 minutes
+      const isExpired = Date.now() - cached.timestamp > 5 * 60 * 1000;
+      return isExpired ? null : cached;
+    },
+    [searchCache]
+  );
+
+  // Load features with proper error handling and state management
+  const loadFeatures = useCallback(
+    async (pageNum: number = 1, mode: "replace" | "append" = "replace", useCache: boolean = true) => {
+      if (loadingRef.current) {
+        console.log("Load already in progress, skipping");
+        return;
+      }
+
+      const requestId = ++requestIdRef.current;
+      loadingRef.current = true;
+      setError(null);
+
+      const currentSearchTerm = debouncedSearchQuery.trim();
+
+      // Disable highlighting while loading new search results
+      if (mode === "replace" && currentSearchTerm !== lastSearchTerm) {
+        setShouldHighlight(false);
+      }
+
+      // Generate current search key
+      const searchKey = getSearchKey(debouncedSearchQuery, statusFilter, sortBy);
+
+      // Update loading state
+      setLoading((prev) => ({
+        ...prev,
+        initial: mode === "replace" && pageNum === 1 && features.length === 0,
+        more: mode === "append",
+        search: mode === "replace" && debouncedSearchQuery.trim().length > 0,
+      }));
+
+      try {
+        // For append mode, check cache first
+        if (mode === "append" && useCache) {
+          const cached = getCachedResults(searchKey);
+          if (cached && cached.page >= pageNum) {
+            // We have cached results for this page or beyond
+            const cachedFeatures = cached.features.slice(0, pageNum * 10);
+            setFeatures(cachedFeatures);
+            setPage(pageNum);
+            setHasMore(cached.hasMore);
+            setTotalCount(cached.totalCount);
+            loadingRef.current = false;
+            setLoading({ initial: false, more: false, search: false });
+            return;
+          }
+        }
 
         const response = await adminApi.getFeatures({
           q: debouncedSearchQuery.trim() || undefined,
-          filter: statusFilter as any,
+          filter: statusFilter,
           sort: sortBy,
-          limit: 20,
+          limit: 10,
           page: pageNum,
         });
 
-        if (mode === "replace") {
-          setFeatures(response.items || []);
-        } else {
-          setFeatures((prev) => [...prev, ...(response.items || [])]);
+        // Check if this request is still the latest
+        if (requestId !== requestIdRef.current) {
+          loadingRef.current = false;
+          return; // Abort if superseded by newer request
         }
 
-        setHasMore(response.hasMore || false);
+        const newFeatures = response.items || [];
+
+        // Update features
+        if (mode === "replace") {
+          setFeatures(newFeatures);
+        } else {
+          setFeatures((prev) => {
+            // Remove duplicates when appending
+            const existingIds = new Set(prev.map((f) => f.id));
+            const uniqueNewFeatures = newFeatures.filter((f) => !existingIds.has(f.id));
+            return [...prev, ...uniqueNewFeatures];
+          });
+        }
+
+        // Update pagination state
         setPage(pageNum);
+        setHasMore(response.hasMore || false);
+        setTotalCount(response.total || 0);
+
+        // Enable highlighting after successful search results are loaded
+        if (mode === "replace" && currentSearchTerm) {
+          setLastSearchTerm(currentSearchTerm);
+          setShouldHighlight(true);
+        } else if (mode === "replace" && !currentSearchTerm) {
+          // No search term, so no highlighting needed
+          setLastSearchTerm("");
+          setShouldHighlight(false);
+        }
+
+        // Cache the results
+        if (mode === "replace") {
+          setSearchCache((prev) => ({
+            ...prev,
+            [searchKey]: {
+              features: newFeatures,
+              page: pageNum,
+              hasMore: response.hasMore || false,
+              totalCount: response.total || 0,
+              timestamp: Date.now(),
+            },
+          }));
+        }
       } catch (error: any) {
-        console.error("Error loading features:", error);
-        setError("Failed to load features. Please try again.");
+        // Only handle error if this is still the current request
+        if (requestId === requestIdRef.current) {
+          console.error("Error loading features:", error);
+          setError(error.message || "Failed to load features. Please try again.");
+        }
       } finally {
-        setIsLoading(false);
-        setIsSearching(false);
-        setLoadingMore(false);
+        // Only update loading state if this is still the current request
+        if (requestId === requestIdRef.current) {
+          loadingRef.current = false;
+          setLoading({
+            initial: false,
+            more: false,
+            search: false,
+          });
+        }
       }
     },
-    [debouncedSearchQuery, statusFilter, sortBy]
+    [debouncedSearchQuery, statusFilter, sortBy, features.length, getSearchKey, getCachedResults]
   );
 
-  // Load features with debounced search
+  // Initial load
   useEffect(() => {
+    const initialSearchKey = getSearchKey("", "all", "new");
+    setCurrentSearchKey(initialSearchKey);
     loadFeatures(1, "replace");
-  }, [debouncedSearchQuery, statusFilter, sortBy]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Clean up expired cache entries
+  useEffect(() => {
+    const cleanup = () => {
+      setSearchCache((prev) => {
+        const now = Date.now();
+        const cleaned = { ...prev };
+
+        Object.keys(cleaned).forEach((key) => {
+          if (now - cleaned[key].timestamp > 10 * 60 * 1000) {
+            // 10 minutes
+            delete cleaned[key];
+          }
+        });
+
+        return cleaned;
+      });
+    };
+
+    const interval = setInterval(cleanup, 5 * 60 * 1000); // Clean every 5 minutes
+    return () => clearInterval(interval);
+  }, []);
+
+  // Handle search/filter/sort changes with smart caching
+  useEffect(() => {
+    const currentSearchState: SearchState = {
+      query: debouncedSearchQuery,
+      filter: statusFilter,
+      sort: sortBy,
+    };
+
+    // Check if search parameters actually changed
+    const prevSearchState = searchStateRef.current;
+    const hasSearchChanged =
+      prevSearchState.query !== currentSearchState.query ||
+      prevSearchState.filter !== currentSearchState.filter ||
+      prevSearchState.sort !== currentSearchState.sort;
+
+    if (hasSearchChanged) {
+      // Generate new search key
+      const newSearchKey = getSearchKey(debouncedSearchQuery, statusFilter, sortBy);
+      setCurrentSearchKey(newSearchKey);
+
+      // Check if we have cached results for this search
+      const cachedResults = getCachedResults(newSearchKey);
+
+      if (cachedResults) {
+        // Show cached results immediately
+        setFeatures(cachedResults.features);
+        setPage(cachedResults.page);
+        setHasMore(cachedResults.hasMore);
+        setTotalCount(cachedResults.totalCount);
+        setError(null);
+
+        // Then fetch fresh data in the background
+        loadFeatures(1, "replace", false);
+      } else {
+        // No cache available, reset and show loading
+        setPage(1);
+        setHasMore(false);
+        setFeatures([]);
+        setTotalCount(0);
+        loadFeatures(1, "replace");
+      }
+
+      searchStateRef.current = currentSearchState;
+    }
+  }, [debouncedSearchQuery, statusFilter, sortBy, loadFeatures, getSearchKey, getCachedResults]);
 
   // Intersection observer for infinite scroll
   useEffect(() => {
@@ -188,20 +418,28 @@ export function FeaturesManagement() {
     if (!el) return;
 
     const observer = new IntersectionObserver(
-      async (entries) => {
+      (entries) => {
         const [entry] = entries;
-        if (entry.isIntersecting && hasMore && !loadingMore && !isLoading && !isSearching) {
-          await loadFeatures(page + 1, "append");
+        if (entry.isIntersecting && hasMore && !loading.more && !loadingRef.current) {
+          loadFeatures(page + 1, "append");
         }
       },
-      { rootMargin: "300px 0px 300px 0px", threshold: 0 }
+      { rootMargin: "200px 0px 200px 0px", threshold: 0.1 }
     );
 
     observer.observe(el);
     return () => observer.disconnect();
-  }, [hasMore, loadingMore, isLoading, isSearching, page, loadFeatures]);
+  }, [hasMore, loading.more, page, loadFeatures]);
 
   const handleStatusUpdate = async (featureId: string, newStatus: string) => {
+    // Find the current feature to check its current status
+    const currentFeature = features.find((f) => f.id === featureId);
+
+    // If the status hasn't changed, don't make the API call
+    if (currentFeature && currentFeature.status === newStatus) {
+      return; // No change needed, exit early
+    }
+
     try {
       setIsUpdating(featureId);
       const success = await adminApi.updateFeatureStatus(featureId, newStatus);
@@ -232,6 +470,8 @@ export function FeaturesManagement() {
       const success = await adminApi.deleteFeature(featureToDelete.id);
       if (success) {
         setFeatures((prev) => prev.filter((f) => f.id !== featureToDelete.id));
+        // Update total count
+        setTotalCount((prev) => Math.max(0, prev - 1));
         toast.success("Feature deleted successfully!");
       } else {
         toast.error("Failed to delete feature");
@@ -251,9 +491,9 @@ export function FeaturesManagement() {
 
     return (
       <div className="flex items-center justify-center py-6">
-        <div className="flex items-center space-x-3 px-4 py-2 rounded-full bg-gray-50 border border-gray-200">
+        <div className="flex items-center space-x-3 px-4 py-2 rounded-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
           <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
-          <span className="text-sm text-gray-600 font-medium">Loading more features...</span>
+          <span className="text-sm text-gray-600 dark:text-gray-300 font-medium">Loading more features...</span>
         </div>
       </div>
     );
@@ -261,34 +501,32 @@ export function FeaturesManagement() {
 
   // End of list indicator component
   const EndOfListIndicator = ({ show, count }: { show: boolean; count: number }) => {
-    if (!show || count === 0 || count <= 20) return null;
+    if (!show || count === 0 || count <= 10) return null;
 
     return (
       <div className="flex items-center justify-center py-8">
         <div className="flex flex-col items-center space-y-2">
-          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-green-100 to-blue-100 flex items-center justify-center">
-            <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-green-100 to-blue-100 dark:from-green-800 dark:to-blue-800 flex items-center justify-center">
+            <svg className="w-6 h-6 text-green-600 dark:text-green-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
             </svg>
           </div>
-          <div className="text-sm font-medium text-gray-700">You're all caught up!</div>
-          <div className="text-xs text-gray-500">You've seen all {count} feature requests</div>
+          <div className="text-sm font-medium text-gray-700 dark:text-gray-300">You're all caught up!</div>
+          <div className="text-xs text-gray-500 dark:text-gray-400">You've seen all {count} feature requests</div>
         </div>
       </div>
     );
   };
 
+  // Client-side filtering for search terms (API already handles server-side filtering)
   const filteredFeatures = features.filter((feature) => {
-    const matchesSearch =
-      !searchQuery ||
-      feature.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      feature.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      feature.author_name.toLowerCase().includes(searchQuery.toLowerCase());
-
-    const matchesStatus = statusFilter === "all" || feature.status === statusFilter;
-
-    return matchesSearch && matchesStatus;
+    // Additional client-side filtering if needed
+    // Most filtering is done server-side, but we can add client-side search highlighting
+    return true;
   });
+
+  // Smart highlighting - only show when results are loaded and we have a search term
+  const shouldHighlightSearch = shouldHighlight && lastSearchTerm.length > 0;
 
   return (
     <>
@@ -304,13 +542,30 @@ export function FeaturesManagement() {
                 placeholder="Search features..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-10 pr-4 h-11"
+                className="pl-10 pr-20 h-11" // Increased right padding for buttons
               />
-              {isSearching && (
-                <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary opacity-70"></div>
-                </div>
-              )}
+
+              {/* Right side - Loading + Clear button */}
+              <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                {/* Loading indicator */}
+                {loading.search && (
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent flex-shrink-0" />
+                )}
+
+                {/* Clear button - only show if there's text */}
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    className="p-1 rounded-full hover:bg-gray-100 transition-colors flex-shrink-0"
+                    title="Clear search"
+                    type="button"
+                  >
+                    <svg className="w-4 h-4 text-muted-foreground hover:text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Filter Section */}
@@ -344,7 +599,7 @@ export function FeaturesManagement() {
                   {Object.entries(statusConfig)
                     .filter(([key]) => key !== "all")
                     .map(([statusKey, statusInfo]) => (
-                      <DropdownMenuItem key={statusKey} onClick={() => setStatusFilter(statusKey)}>
+                      <DropdownMenuItem key={statusKey} onClick={() => setStatusFilter(statusKey as FilterOption)}>
                         <div className="flex items-center gap-2 w-full">
                           {React.createElement(statusInfo.icon, {
                             className: "w-4 h-4",
@@ -396,7 +651,7 @@ export function FeaturesManagement() {
           )}
 
           {/* Loading States */}
-          {isLoading ? (
+          {loading.initial && features.length === 0 ? (
             <div className="bg-card rounded-2xl p-12 border border-border text-center">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
               <p className="text-muted-foreground">Loading features...</p>
@@ -418,20 +673,28 @@ export function FeaturesManagement() {
           ) : (
             <>
               {filteredFeatures.map((feature) => {
+                // Ensure feature has a unique ID for React key
+                if (!feature.id) {
+                  console.error("Feature missing ID:", feature);
+                  return null;
+                }
                 return (
-                  <div key={feature.id} className="bg-card rounded-2xl p-4 sm:p-6 border border-border shadow-sm hover:shadow-md transition-shadow">
+                  <div
+                    key={`feature-${feature.id}`}
+                    className="bg-card rounded-2xl p-4 sm:p-6 border border-border shadow-sm hover:shadow-md transition-shadow"
+                  >
                     {/* Mobile: Column layout, Desktop: Row layout */}
                     <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 lg:gap-6">
                       {/* Feature Content */}
                       <div className="flex-1 min-w-0">
                         <div className="mb-3">
-                          <h3 className="text-base md:text-base lg:text-base font-semibold text-foreground break-words">
-                            {highlightSearchText(feature.title, searchQuery)}
+                          <h3 className="text-base md:text-base lg:text-base font-semibold text-foreground break-word line-clamp-2 overflow-hidden">
+                            {highlightSearchText(feature.title, lastSearchTerm, shouldHighlightSearch)}
                           </h3>
                         </div>
 
-                        <p className="text-muted-foreground mb-4 text-xs sm:text-base md:text-base lg:text-sm leading-relaxed">
-                          {highlightSearchText(feature.description, searchQuery)}
+                        <p className="text-muted-foreground mb-4 text-xs sm:text-base md:text-base lg:text-sm leading-relaxed line-clamp-3 overflow-hidden">
+                          {highlightSearchText(feature.description, lastSearchTerm, shouldHighlightSearch)}
                         </p>
 
                         {/* Metadata - Responsive flex layout */}
@@ -441,7 +704,9 @@ export function FeaturesManagement() {
                               <User className="w-4 h-4" />
                             </div>
                             <div className="min-w-0">
-                              <span className="truncate block">{highlightSearchText(feature.author_name, searchQuery)}</span>
+                              <span className="truncate block">
+                                {highlightSearchText(feature.author_name, lastSearchTerm, shouldHighlightSearch)}
+                              </span>
                               <span className="truncate block text-xs">{feature.author_email}</span>
                             </div>
                           </div>
@@ -450,13 +715,13 @@ export function FeaturesManagement() {
                             <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
                               <ThumbsUp className="w-4 h-4" />
                             </div>
-                            <span className="text-xs sm:text-sm">{feature.votes_count} votes</span>
+                            <span className="text-xs sm:text-sm">{formatCount(feature.votes_count, "vote")}</span>
                           </div>
                           <div className="flex items-center gap-2">
                             <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
                               <MessageSquare className="w-4 h-4" />
                             </div>
-                            <span className="text-xs sm:text-sm">{feature.comments_count} comments</span>
+                            <span className="text-xs sm:text-sm">{formatCount(feature.comments_count, "comment")}</span>
                           </div>
                           <div className="flex items-center gap-2">
                             <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
@@ -533,8 +798,8 @@ export function FeaturesManagement() {
               <div ref={sentinelRef} />
 
               {/* Loading indicators */}
-              <LoadMoreIndicator isVisible={loadingMore} />
-              <EndOfListIndicator show={!hasMore && !loadingMore} count={features.length} />
+              <LoadMoreIndicator isVisible={loading.more} />
+              <EndOfListIndicator show={!hasMore && !loading.more} count={features.length} />
             </>
           )}
         </div>

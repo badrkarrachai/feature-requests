@@ -8,13 +8,15 @@ export default function FeatureList({
   onToggleVote,
   searchterm,
   onOpenNew,
+  pendingVotes = new Set(),
 }: {
   items?: Feature[];
   searchterm: string;
   onOpenNew: () => void;
   onToggleVote: (id: string, currentVoted: boolean) => void;
+  pendingVotes?: Set<string>;
 }) {
-  if ((!Array.isArray(items) || items.length === 0) && searchterm !== "") {
+  if ((!Array.isArray(items) || items.length === 0) && searchterm && searchterm.trim() !== "") {
     return (
       <div className="border-x border-b rounded-b-xl">
         <div className="flex flex-col items-center justify-center py-12 px-8">
@@ -73,7 +75,15 @@ export default function FeatureList({
   return (
     <div className="border-x rounded-b-xl border-b">
       {items.map((it) => (
-        <FeatureCard showBottomBorder={it !== items[items.length - 1]} key={it.id} item={it} onToggleVote={onToggleVote} searchTerm={searchterm} />
+        <FeatureCard
+          showBottomBorder={it !== items[items.length - 1]}
+          key={it.id}
+          item={it}
+          onToggleVote={onToggleVote}
+          searchTerm={searchterm}
+          isSearchActive={!!(searchterm && searchterm.trim())}
+          isVotePending={pendingVotes.has(it.id)}
+        />
       ))}
     </div>
   );

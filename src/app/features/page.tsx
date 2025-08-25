@@ -131,6 +131,41 @@ const EndOfListIndicator = ({ show, count }: EndOfListIndicatorProps) => {
   );
 };
 
+interface ErrorDisplayProps {
+  error: string | null;
+  onRetry: () => void;
+}
+
+const ErrorDisplay = ({ error, onRetry }: ErrorDisplayProps) => {
+  if (!error) return null;
+
+  return (
+    <div className="border-x border-b rounded-b-xl">
+      <div className="flex flex-col items-center justify-center py-12 px-8">
+        <div className="mb-4 p-3 rounded-full bg-red-50 border border-red-100">
+          <svg className="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.864-.833-2.634 0L4.168 15.5c-.77.833.192 2.5 1.732 2.5z"
+            />
+          </svg>
+        </div>
+        <h3 className="text-lg font-medium text-gray-900 mb-2">Something went wrong</h3>
+        <p className="text-sm text-gray-600 text-center max-w-sm mb-4">{error}</p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors duration-200"
+        >
+          Try again
+        </button>
+      </div>
+    </div>
+  );
+};
+
 interface EmptyStateProps {
   searchterm: string;
   onOpenNew: () => void;
@@ -148,35 +183,38 @@ function FeaturesPageContent() {
   const initialFilter = parseFilter(params.get("filter"));
   const initialSort: FeatureSort = initialFilter !== "all" ? null : parseSort(params.get("sort"));
 
+  // Core state
   const [items, setItems] = useState<Feature[]>([]);
   const [q, setQ] = useState(params.get("q") || "");
   const [sort, setSort] = useState<FeatureSort>(initialSort);
   const [filter, setFilter] = useState<FeatureFilter>(initialFilter);
 
-  const [initialLoading, setInitialLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [searching, setSearching] = useState(false);
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
-  const [page, setPage] = useState(1);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+  // Request tracking for race condition protection
+  const requestIdRef = useRef(0);
+
+  // Loading states
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [isSearching, setIsSearching] = useState(false);
+
+  // Smart highlighting - only highlight after search results are loaded
+  const [lastSearchTerm, setLastSearchTerm] = useState("");
+  const [shouldHighlight, setShouldHighlight] = useState(false);
+
+  // Error handling
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // No need for additional debouncing - TopBar already handles it
 
   const [open, setOpen] = useState(false);
 
-  // optimistic vote pending map
-  const [pendingVotes, setPendingVotes] = useState<Record<string, 1 | -1>>({});
-
-  // overlay optimistic toggles on any server list
-  function withPendingOverlay(list: Feature[]) {
-    if (!list?.length) return list;
-    return list.map((f) => {
-      const delta = pendingVotes[f.id] ?? 0;
-      if (!delta) return f;
-      return {
-        ...f,
-        votedByMe: !f.votedByMe,
-        votes_count: Math.max(0, f.votes_count + delta),
-      };
-    });
-  }
+  // Store original states for vote reverts
+  const [originalVoteStates, setOriginalVoteStates] = useState<Record<string, { votedByMe: boolean; votes_count: number }>>({});
+  const [pendingVotes, setPendingVotes] = useState<Set<string>>(new Set());
 
   // Build query string (one of sort/filter)
   const baseQS = useMemo(() => {
@@ -194,79 +232,183 @@ function FeaturesPageContent() {
     router.replace(`/features?${baseQS}`);
   }, [baseQS, router]);
 
-  // Load a specific page and append/replace
-  async function fetchPage(p: number, mode: "replace" | "append") {
-    const res = await fetch(`/api/features?${baseQS}&limit=10&page=${p}`, {
-      cache: "no-store",
-    });
-    if (!res.ok) throw new Error("Failed to load");
-    const data: ApiPage = await res.json();
-    const newList = withPendingOverlay(data.items || []);
+  // Load a specific page with race condition protection
+  async function fetchPage(pageNum: number, isLoadMore = false) {
+    const requestId = ++requestIdRef.current;
+    const currentSearchTerm = q.trim();
 
-    setItems((prev) => (mode === "replace" ? newList : [...prev, ...newList]));
-    setHasMore(!!data.hasMore);
-    setPage(data.page);
+    // Clear previous errors when starting new request
+    if (!isLoadMore) {
+      setFetchError(null);
+      // Disable highlighting while loading new search results
+      if (currentSearchTerm !== lastSearchTerm) {
+        setShouldHighlight(false);
+      }
+    }
+
+    try {
+      const res = await fetch(`/api/features?${baseQS}&limit=10&page=${pageNum}`, {
+        cache: "no-store",
+      });
+
+      // Check if this request is still the latest
+      if (requestId !== requestIdRef.current) {
+        return; // Abort if superseded by newer request
+      }
+
+      if (!res.ok) {
+        let errorMessage = "Failed to load features";
+        try {
+          const errorData = await res.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch {
+          // Use default error message if response isn't JSON
+        }
+        throw new Error(errorMessage);
+      }
+
+      const data: ApiPage = await res.json();
+
+      // Double-check request is still current after async operation
+      if (requestId !== requestIdRef.current) {
+        return; // Abort if superseded
+      }
+
+      const newItems = data.items || [];
+
+      if (isLoadMore) {
+        setItems((prev) => {
+          // Prevent duplicates by filtering out items that already exist
+          const existingIds = new Set(prev.map((item) => item.id));
+          const uniqueNewItems = newItems.filter((item) => !existingIds.has(item.id));
+          return [...prev, ...uniqueNewItems];
+        });
+        setCurrentPage(pageNum);
+      } else {
+        setItems(newItems);
+        setCurrentPage(1);
+      }
+
+      setHasMore(!!data.hasMore);
+      setFetchError(null); // Clear any previous errors on success
+
+      // Enable highlighting after successful search results are loaded
+      if (!isLoadMore && currentSearchTerm) {
+        setLastSearchTerm(currentSearchTerm);
+        setShouldHighlight(true);
+      } else if (!isLoadMore && !currentSearchTerm) {
+        // No search term, so no highlighting needed
+        setLastSearchTerm("");
+        setShouldHighlight(false);
+      }
+
+      return newItems;
+    } catch (error) {
+      // Only log/handle error if this is still the current request
+      if (requestId === requestIdRef.current) {
+        const errorMessage = error instanceof Error ? error.message : "An unexpected error occurred";
+        setFetchError(errorMessage);
+        console.error("Error fetching page:", error);
+        throw error;
+      }
+    }
   }
 
-  // initial load / parameter reset
-  useEffect(() => {
-    if (!email) return;
-    if (!name) return;
-    (async () => {
-      setInitialLoading(true);
-      try {
-        await fetchPage(1, "replace");
-      } finally {
-        setInitialLoading(false);
-      }
-    })();
-    // reset scroll could be done here if needed
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, name, sort, filter]); // Only reload on sort/filter changes, not search
-
-  // Handle search queries separately without full loading overlay
+  // Initial load and reset on sort/filter changes
   useEffect(() => {
     if (!email || !name) return;
-    // Skip if this is the initial load (when items is empty and no search)
-    if (items.length === 0 && q === "") return;
+
+    const loadInitialData = async () => {
+      setIsInitialLoading(true);
+      try {
+        await fetchPage(1, false);
+      } catch (error) {
+        console.error("Error loading initial data:", error);
+      } finally {
+        setIsInitialLoading(false);
+      }
+    };
+
+    loadInitialData();
+  }, [email, name, sort, filter]); // Reset on sort/filter changes
+
+  // Handle search changes (already debounced by TopBar)
+  useEffect(() => {
+    if (!email || !name) return;
+
+    // Skip if this is the initial load
+    if (isInitialLoading) return;
 
     const performSearch = async () => {
-      setSearching(true);
+      setIsSearching(true);
       try {
-        await fetchPage(1, "replace");
+        await fetchPage(1, false); // Reset to page 1 for new search
+      } catch (error) {
+        console.error("Error performing search:", error);
       } finally {
-        setSearching(false);
+        setIsSearching(false);
       }
     };
 
     performSearch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q]); // Only trigger on search query changes
+  }, [q, email, name, sort, filter]); // Trigger on search changes
 
-  // intersection observer for infinite scroll
+  // intersection observer for infinite scroll - stable implementation
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const observerRef = useRef<IntersectionObserver | null>(null);
+
+  // Cleanup function for observer
+  const cleanupObserver = () => {
+    if (observerRef.current) {
+      try {
+        observerRef.current.disconnect();
+      } catch (error) {
+        console.warn("Error disconnecting observer:", error);
+      } finally {
+        observerRef.current = null;
+      }
+    }
+  };
+
   useEffect(() => {
+    // Clean up previous observer
+    cleanupObserver();
+
     const el = sentinelRef.current;
     if (!el) return;
 
-    const obs = new IntersectionObserver(
-      async (entries) => {
-        const [entry] = entries;
-        if (entry.isIntersecting && hasMore && !loadingMore && !initialLoading) {
-          setLoadingMore(true);
-          try {
-            await fetchPage(page + 1, "append");
-          } finally {
-            setLoadingMore(false);
-          }
+    const handleIntersection = async (entries: IntersectionObserverEntry[]) => {
+      const [entry] = entries;
+      if (entry.isIntersecting && hasMore && !isLoadingMore && !isInitialLoading && !isSearching) {
+        setIsLoadingMore(true);
+        try {
+          await fetchPage(currentPage + 1, true);
+        } catch (error) {
+          console.error("Error loading more:", error);
+        } finally {
+          setIsLoadingMore(false);
         }
-      },
-      { rootMargin: "300px 0px 300px 0px", threshold: 0 } // eager prefetch
-    );
+      }
+    };
 
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [hasMore, loadingMore, initialLoading, page, baseQS, email, name]); // reload observer when deps change
+    try {
+      observerRef.current = new IntersectionObserver(handleIntersection, {
+        rootMargin: "100px 0px 100px 0px", // Less aggressive prefetch
+        threshold: 0,
+      });
+
+      observerRef.current.observe(el);
+    } catch (error) {
+      console.warn("Error creating IntersectionObserver:", error);
+    }
+
+    return cleanupObserver;
+  }, [hasMore, isLoadingMore, isInitialLoading, isSearching, currentPage]); // Stable dependencies
+
+  // Additional cleanup on component unmount
+  useEffect(() => {
+    return cleanupObserver;
+  }, []);
 
   // When user chooses a sort, clear filter
   function applySort(s: FeatureSort) {
@@ -279,17 +421,48 @@ function FeaturesPageContent() {
     setSort(null);
   }
 
-  // Pure optimistic vote; only revert on failure
-  async function onToggleVote(id: string, currentVoted: boolean) {
-    const delta: 1 | -1 = currentVoted ? -1 : 1;
+  // Retry function for error handling
+  const retryFetch = async () => {
+    setIsInitialLoading(true);
+    setFetchError(null);
+    setShouldHighlight(false); // Reset highlighting on retry
+    try {
+      await fetchPage(1, false);
+    } catch (error) {
+      // Error is already handled in fetchPage
+    } finally {
+      setIsInitialLoading(false);
+    }
+  };
 
-    setPendingVotes((prev) => ({ ...prev, [id]: delta }));
+  // Optimistic vote with proper state management
+  async function onToggleVote(id: string, currentVoted: boolean) {
+    // Prevent duplicate votes if already pending
+    if (pendingVotes.has(id)) return;
+
+    // Find the current item to store original state
+    const currentItem = items.find((f) => f.id === id);
+    if (!currentItem) return;
+
+    // Store original state for potential revert
+    const originalState = {
+      votedByMe: !!currentItem.votedByMe,
+      votes_count: currentItem.votes_count,
+    };
+
+    // Optimistically update the UI immediately with all state changes batched
+    const newVotedState = !currentVoted;
+    const delta = newVotedState ? 1 : -1;
+
+    // Batch all initial state updates together
+    setOriginalVoteStates((prev) => ({ ...prev, [id]: originalState }));
+    setPendingVotes((prev) => new Set(prev).add(id));
     setItems((prev) =>
       prev.map((f) =>
         f.id === id
           ? {
               ...f,
-              votedByMe: !currentVoted,
+              votedByMe: newVotedState,
               votes_count: Math.max(0, f.votes_count + delta),
             }
           : f
@@ -306,35 +479,56 @@ function FeaturesPageContent() {
           image_url: undefined, // User profile image URL if available
         }),
       });
-      if (!res.ok) {
-        // revert on server error
+
+      if (res.ok) {
+        // Success - update with server data
+        const data = await res.json();
         setItems((prev) =>
           prev.map((f) =>
             f.id === id
               ? {
                   ...f,
-                  votedByMe: currentVoted,
-                  votes_count: Math.max(0, f.votes_count - delta),
+                  votedByMe: data.voted,
+                  votes_count: data.votes_count,
+                }
+              : f
+          )
+        );
+      } else {
+        // Revert to original state on server error
+        setItems((prev) =>
+          prev.map((f) =>
+            f.id === id
+              ? {
+                  ...f,
+                  votedByMe: originalState.votedByMe,
+                  votes_count: originalState.votes_count,
                 }
               : f
           )
         );
       }
     } catch {
-      // revert on network error
+      // Revert to original state on network error
       setItems((prev) =>
         prev.map((f) =>
           f.id === id
             ? {
                 ...f,
-                votedByMe: currentVoted,
-                votes_count: Math.max(0, f.votes_count - delta),
+                votedByMe: originalState.votedByMe,
+                votes_count: originalState.votes_count,
               }
             : f
         )
       );
     } finally {
+      // Clean up pending state and original state
       setPendingVotes((prev) => {
+        const newSet = new Set(prev);
+        newSet.delete(id);
+        return newSet;
+      });
+      setOriginalVoteStates((prev) => {
         const { [id]: _, ...rest } = prev;
         return rest;
       });
@@ -362,28 +556,34 @@ function FeaturesPageContent() {
         q={q}
         onSearchChange={setQ}
         onOpenNew={() => setOpen(true)}
-        isRefetching={searching || (loadingMore && !initialLoading)}
+        isRefetching={isSearching || (isLoadingMore && !isInitialLoading)}
         email={email}
         name={name}
       />
 
       <div className="">
-        {initialLoading ? (
+        {isInitialLoading ? (
           <InitialLoader />
+        ) : fetchError ? (
+          <ErrorDisplay error={fetchError} onRetry={retryFetch} />
         ) : (
           <>
-            {
-              <div className="space-y-3">
-                <FeatureList items={items} onToggleVote={onToggleVote} searchterm={q} onOpenNew={() => setOpen(true)} />
-              </div>
-            }
+            <div className="space-y-3">
+              <FeatureList
+                items={items}
+                onToggleVote={onToggleVote}
+                searchterm={shouldHighlight ? lastSearchTerm : ""}
+                onOpenNew={() => setOpen(true)}
+                pendingVotes={pendingVotes}
+              />
+            </div>
 
             {/* Sentinel for infinite scroll */}
             <div ref={sentinelRef} />
 
             {/* Enhanced loading states */}
-            <LoadMoreIndicator isVisible={loadingMore} />
-            <EndOfListIndicator show={!hasMore && !loadingMore} count={items.length} />
+            <LoadMoreIndicator isVisible={isLoadingMore} />
+            <EndOfListIndicator show={!hasMore && !isLoadingMore} count={items.length} />
           </>
         )}
       </div>
@@ -397,11 +597,13 @@ function FeaturesPageContent() {
         onCreated={async () => {
           setOpen(false);
           // reload from first page to include the new item
-          setInitialLoading(true);
+          setIsInitialLoading(true);
           try {
-            await fetchPage(1, "replace");
+            await fetchPage(1, false);
+          } catch (error) {
+            console.error("Error reloading after creation:", error);
           } finally {
-            setInitialLoading(false);
+            setIsInitialLoading(false);
           }
         }}
       />
