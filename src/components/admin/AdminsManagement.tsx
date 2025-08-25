@@ -123,6 +123,7 @@ export function AdminsManagement() {
                     onChange={(e) => setNewAdmin((prev) => ({ ...prev, name: e.target.value }))}
                     placeholder="Admin Name"
                     required
+                    className="h-10"
                   />
                 </div>
 
@@ -135,6 +136,7 @@ export function AdminsManagement() {
                     onChange={(e) => setNewAdmin((prev) => ({ ...prev, email: e.target.value }))}
                     placeholder="admin@example.com"
                     required
+                    className="h-10"
                   />
                 </div>
 
@@ -153,6 +155,7 @@ export function AdminsManagement() {
                       }
                       placeholder="••••••••"
                       required
+                      className="h-10"
                     />
                     <button
                       type="button"

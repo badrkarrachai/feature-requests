@@ -256,33 +256,23 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
                   <div key={feature.id} className="p-4 md:p-6 hover:bg-muted transition-colors">
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
                       <div className="flex-1">
-                        <div className=" flex items-start justify-between">
-                          <div>
-                            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-2">
-                              <h3 className="text-base md:text-base lg:text-base font-semibold text-foreground break-words line-clamp-2 overflow-hidden">
-                                {feature.title}
-                              </h3>
-                              <div
-                                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 md:px-3 md:py-[0.4rem] rounded-full text-xs md:text-sm font-medium self-start sm:self-auto md:hidden ${
-                                  statusConfig[feature.status]?.color
-                                }`}
-                              >
-                                <StatusIcon className="w-3 h-3 md:w-4 md:h-4" />
-                                {statusConfig[feature.status]?.label}
-                              </div>
+                        <div className="flex flex-col gap-2 mb-2">
+                          <div className="flex items-start justify-between gap-3">
+                            <h3 className="text-base md:text-base lg:text-base font-semibold text-foreground break-words line-clamp-2 overflow-hidden flex-1 min-w-0">
+                              {feature.title}
+                            </h3>
+                            <div
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 md:px-3 md:py-[0.4rem] rounded-full text-xs md:text-sm font-medium flex-shrink-0 ${
+                                statusConfig[feature.status]?.color
+                              }`}
+                            >
+                              <StatusIcon className="w-3 h-3 md:w-4 md:h-4" />
+                              {statusConfig[feature.status]?.label}
                             </div>
-                            <p className="text-xs sm:text-base md:text-base lg:text-sm text-muted-foreground mb-3 line-clamp-3 overflow-hidden leading-relaxed">
-                              {feature.description}
-                            </p>
                           </div>
-                          <div
-                            className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-0.5 md:px-3 md:py-[0.4rem] rounded-full text-xs md:text-sm font-medium self-start sm:self-auto ${
-                              statusConfig[feature.status]?.color
-                            }`}
-                          >
-                            <StatusIcon className="w-3 h-3 md:w-4 md:h-4" />
-                            {statusConfig[feature.status]?.label}
-                          </div>
+                          <p className="text-xs sm:text-base md:text-base lg:text-sm text-muted-foreground mb-3 line-clamp-3 overflow-hidden leading-relaxed">
+                            {feature.description}
+                          </p>
                         </div>
 
                         {/* Metadata - Responsive flex layout */}

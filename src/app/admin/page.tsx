@@ -7,6 +7,7 @@ import { AdminLogin } from "@/components/admin/AdminLogin";
 import { AdminsManagement } from "@/components/admin/AdminsManagement";
 import { FeaturesManagement } from "@/components/admin/FeaturesManagement";
 import { DarkModeToggle } from "@/components/admin/DarkModeToggle";
+import { ChangePasswordModal } from "@/components/admin/ChangePasswordModal";
 import { AdminAuthProvider, useAdminAuth } from "@/hooks/useAdminAuth";
 import { DarkModeProvider } from "@/hooks/useDarkMode";
 import type { AdminTabType } from "@/types/admin";
@@ -14,10 +15,17 @@ import type { AdminTabType } from "@/types/admin";
 function AdminContent() {
   const { isAuthenticated, currentAdmin, isLoading, logout } = useAdminAuth();
   const [activeTab, setActiveTab] = useState<AdminTabType>("dashboard");
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
 
   useEffect(() => {
-    if (isAuthenticated) setActiveTab("dashboard");
-  }, [isAuthenticated]);
+    if (isAuthenticated) {
+      setActiveTab("dashboard");
+      // Check if admin needs to change default password
+      if (currentAdmin?.isDefaultPassword) {
+        setShowPasswordModal(true);
+      }
+    }
+  }, [isAuthenticated, currentAdmin?.isDefaultPassword]);
 
   if (isLoading) {
     return (
@@ -124,6 +132,19 @@ function AdminContent() {
         {/* Content */}
         {renderTabContent()}
       </div>
+
+      {/* Password Change Modal */}
+      {currentAdmin && (
+        <ChangePasswordModal
+          isOpen={showPasswordModal}
+          adminEmail={currentAdmin.email}
+          isDefaultAccount={currentAdmin.isDefaultPassword || false}
+          onPasswordChanged={() => {
+            setShowPasswordModal(false);
+            // The modal will handle logout and force re-authentication
+          }}
+        />
+      )}
     </div>
   );
 }

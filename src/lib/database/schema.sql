@@ -23,6 +23,9 @@ begin
   create type user_role as enum ('user','admin');
 end $$;
 
+create extension if not exists pgcrypto with schema extensions;
+
+
 -- =========================================================
 -- Generic updated_at trigger
 -- =========================================================
@@ -115,6 +118,9 @@ create table if not exists public.notifications (
   updated_at       timestamptz not null default now()
 );
 
+alter table public.notifications
+  add column if not exists read_at timestamptz;
+
 -- Notifications indexes
 create index if not exists idx_notifications_user_id            on public.notifications(user_id);
 create index if not exists idx_notifications_user_read          on public.notifications(user_id, read) where read = false;
@@ -123,6 +129,25 @@ create index if not exists idx_notifications_created_at         on public.notifi
 create index if not exists idx_notifications_user_type          on public.notifications(user_id, type);
 create index if not exists idx_notifications_group_key          on public.notifications(group_key);
 create index if not exists idx_notifications_feature_type       on public.notifications(feature_id, type);
+create index if not exists notifications_read_at_idx            on public.notifications (read, read_at);
+
+
+
+create or replace function public.set_read_at()
+returns trigger language plpgsql as $$
+begin
+  if new.read = true
+     and (old.read is distinct from true)
+     and new.read_at is null then
+    new.read_at := now();
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists trg_notifications_read_at on public.notifications;
+create trigger trg_notifications_read_at
+before update on public.notifications
+for each row execute procedure public.set_read_at();
 
 -- =========================================================
 -- Counters: votes_count / comments_count
@@ -305,6 +330,37 @@ begin
 end;
 $$;
 
+create or replace function public.admin_change_password(
+  p_admin_email text,
+  p_old_password text,
+  p_new_password text
+) returns boolean
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare v_admin_id uuid;
+begin
+  if coalesce(p_new_password,'') = '' then
+    raise exception 'new password required';
+  end if;
+
+  v_admin_id := public.verify_admin_return_id(p_admin_email, p_old_password);
+
+  update public.users
+     set password_hash = extensions.crypt(p_new_password, extensions.gen_salt('bf')),
+         updated_at = now()
+   where id = v_admin_id;
+
+  return true;
+end;
+$$;
+
+
+grant execute on function public.admin_change_password(text,text,text)
+to anon, authenticated;
+
+
 -- Create or promote an admin (sets password as plain text)
 create or replace function public.admin_upsert(
   p_email     text,
@@ -314,7 +370,7 @@ create or replace function public.admin_upsert(
 ) returns uuid
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions
 as $$
 declare v_id uuid;
 begin
@@ -326,13 +382,15 @@ begin
 
   update public.users
      set role = 'admin',
-         password_hash = p_password,  -- Store as plain text
+         -- bcrypt (default cost)
+         password_hash = extensions.crypt(p_password, extensions.gen_salt('bf')),
          updated_at = now()
    where id = v_id;
 
   return v_id;
 end;
 $$;
+
 
 -- Internal: verify an admin email+password, return id (plain text comparison)
 create or replace function public.verify_admin_return_id(
@@ -341,32 +399,66 @@ create or replace function public.verify_admin_return_id(
 ) returns uuid
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions
 as $$
 declare v_id uuid;
-       v_stored_password text;
 begin
-  select id, password_hash
-    into v_id, v_stored_password
-    from public.users
-   where email = lower(trim(p_email)) and role = 'admin';
+  -- bcrypt check: crypt(input, stored_hash) = stored_hash
+  select u.id
+    into v_id
+    from public.users u
+   where u.email = lower(trim(p_email))
+     and u.role = 'admin'
+     and u.password_hash is not null
+     and u.password_hash = extensions.crypt(p_password, u.password_hash);
 
   if v_id is null then
-    raise exception 'admin user not found';
-  end if;
-
-  if v_stored_password is null then
-    raise exception 'admin password not set';
-  end if;
-
-  -- Simple plain text password comparison
-  if v_stored_password != p_password then
-    raise exception 'invalid admin password';
+    raise exception 'invalid admin credentials';
   end if;
 
   return v_id;
 end;
 $$;
+
+-- Lock down the base users table
+revoke select on public.users from anon, authenticated;
+
+-- Drop the open read policy (it’s not needed if clients read the view)
+drop policy if exists users_select on public.users;
+
+-- (Belt & suspenders) If you ever re-grant table access, keep the hash hidden:
+revoke select (password_hash) on public.users from anon, authenticated;
+
+-- A safe view (no password_hash)
+create or replace view public.users_public
+with (security_invoker = on) as
+select id, email, name, image_url, role, created_at, updated_at
+from public.users;
+
+grant select on public.users_public to anon, authenticated;
+
+
+do $$
+begin
+  if not exists (select 1 from public.users where email='admin@admin.com') then
+    perform public.admin_upsert('admin@admin.com', 'Admin', null, 'admin');
+  else
+    update public.users
+       set role='admin',
+           updated_at = now()
+     where email='admin@admin.com'
+       and role <> 'admin';
+
+    -- If password is NULL or looks non-bcrypt, set hashed default
+    update public.users
+       set password_hash = extensions.crypt('admin', extensions.gen_salt('bf')),
+           updated_at = now()
+     where email='admin@admin.com'
+       and (password_hash is null or password_hash !~ '^\$2[abxy]\$');
+  end if;
+end $$;
+
+
 
 -- =========================================================
 -- RPC: Public create/toggle/comment (caller passes email/name/image)
@@ -480,10 +572,18 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare v_user uuid;
-        v_cnt  int;
+declare
+  v_user uuid;
+  v_cnt  int;
 begin
-  v_user := public.ensure_user(p_email, null, null);
+  select id into v_user
+  from public.users
+  where email = lower(trim(p_email));
+
+  if v_user is null then
+    raise exception 'user not found';
+  end if;
+
   perform public.app_activate(v_user, false);
 
   delete from public.comments
@@ -494,6 +594,7 @@ begin
   return v_cnt > 0;
 end;
 $$;
+
 
 -- =========================================================
 -- NOTIFICATION FUNCTIONS
@@ -792,7 +893,7 @@ create trigger trigger_feature_deleted_notification
   for each row
   execute function public.notify_on_feature_deleted();
 
--- Cleanup function (older than 30 days AND read)
+-- Cleanup function (older than 24 hours AND read)
 create or replace function public.cleanup_old_notifications()
 returns integer
 language plpgsql
@@ -801,18 +902,19 @@ set search_path = public
 as $$
 declare
   deleted_count integer;
-  cutoff_date   timestamptz := now() - interval '30 days';
+  cutoff_date   timestamptz := now() - interval '24 hours';
 begin
   delete from public.notifications
    where read = true
-     and created_at < cutoff_date;
+     and read_at is not null
+     and read_at < cutoff_date;
 
   get diagnostics deleted_count = row_count;
   return deleted_count;
 end;
 $$;
 
--- Schedule daily cleanup at 02:00 (idempotent)
+-- Schedule daily cleanup 
 do $$
 declare v_jobid bigint;
 begin
@@ -826,9 +928,9 @@ begin
 
   -- recreate the job (command must be a plain string)
   perform cron.schedule(
-    'cleanup-old-notifications',
-    '0 2 * * *',
-    'select public.cleanup_old_notifications();'
+  'cleanup-old-notifications',
+  '0 * * * *',
+  'select public.cleanup_old_notifications();'
   );
 end;
 $$;
@@ -948,7 +1050,6 @@ from public.notifications n;
 -- (no JWT required; RPC sets internal flags)
 -- =========================================================
 grant usage on schema public to anon, authenticated;
-grant select on public.features, public.votes, public.comments, public.users, public.notifications to anon, authenticated;
 grant select on public.features_public, public.comments_public, public.notifications_public to anon, authenticated;
 
 grant execute on function
@@ -1040,20 +1141,20 @@ to anon, authenticated;
 --  p_email: adminEmail,
 --  p_name: adminName,
 --  p_image_url: adminImageUrl,
---  p_password: plaintextPassword,
+--  p_password: hashedPassword,
 --});
 
 -- admin: update status / delete
 --await supabase.rpc('admin_update_feature_status', {
 --  p_admin_email: adminEmail,
---  p_password: plaintextPassword,
+--  p_password: hashedPassword,
 --  p_feature_id: featureId,
 --  p_new_status: 'in_progress',
 --});
 
 --await supabase.rpc('admin_delete_feature', {
 --  p_admin_email: adminEmail,
---  p_password: plaintextPassword,
+--  p_password: hashedPassword,
 --  p_feature_id: featureId,
 --});
 
@@ -1503,6 +1604,16 @@ select cron.schedule(
 
 -- 8) Seed once so UI has data immediately
 select public.refresh_trends();
+revoke execute on function public.app_activate(uuid, boolean) from anon, authenticated;
+revoke execute on function public.admin_upsert(text,text,text,text) from anon, authenticated;
+revoke execute on function public.verify_admin_return_id(text,text)   from anon, authenticated;
+revoke execute on function public.create_grouped_notification(uuid,text,text,text,uuid,uuid) from anon, authenticated;
+revoke execute on function public.create_notification(uuid,text,text,text,uuid,uuid)          from anon, authenticated;
+revoke execute on function public.notify_on_feature_status_change()                           from anon, authenticated;
+revoke execute on function public.notify_on_new_vote()                                        from anon, authenticated;
+revoke execute on function public.notify_on_feature_deleted()                                 from anon, authenticated;
+revoke execute on function public.cleanup_old_notifications()                                 from anon, authenticated;
+
 
 -- 9) Quick checks (optional)
 -- select jobid, jobname, schedule, command from cron.job where jobname='trends_hourly';

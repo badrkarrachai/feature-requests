@@ -10,68 +10,74 @@ class AdminApi {
 
     console.log("=== Admin Authentication Debug ===");
     console.log("localStorage keys:", Object.keys(localStorage));
-    console.log("sessionStorage keys:", Object.keys(sessionStorage));
 
-    const storedAuth = localStorage.getItem("__admin_auth_v1");
-    if (storedAuth) {
-      try {
-        const admin = JSON.parse(storedAuth);
-        console.log("Admin data in localStorage:", admin);
-      } catch (error) {
-        console.error("Error parsing admin data:", error);
-      }
-    } else {
-      console.log("No admin data in localStorage");
+    // Check for old auth data
+    const oldAuth = localStorage.getItem("__admin_auth_v1");
+    const oldPassword = sessionStorage.getItem("__admin_password_v1");
+
+    // Check for new auth data
+    const newAuth = localStorage.getItem("__admin_auth_v2");
+
+    // Check cookies (client can read CSRF token but not HTTP-only auth cookies)
+    const cookies = document.cookie.split(";").map((c) => c.trim().split("=")[0]);
+    const hasAuthCookies = cookies.some((name) => ["refresh_token", "session_token"].includes(name));
+
+    console.log("Old auth (v1):", !!oldAuth);
+    console.log("Old password (v1):", !!oldPassword);
+    console.log("New auth (v2):", !!newAuth);
+    console.log("Auth cookies present:", hasAuthCookies);
+
+    if (oldAuth || oldPassword) {
+      console.log("🚨 OLD AUTH DATA DETECTED - Please clear and re-login!");
     }
 
-    const storedPassword = sessionStorage.getItem("__admin_password_v1");
-    if (storedPassword) {
-      console.log("Password found in sessionStorage (length:", storedPassword.length, ")");
+    if (newAuth && hasAuthCookies) {
+      console.log("✅ New secure auth system is working");
     } else {
-      console.log("No password in sessionStorage - THIS IS THE ISSUE!");
-      console.log("You need to login again to store the password in sessionStorage");
+      console.log("❌ Missing new auth data - Please log in with the new system");
     }
     console.log("=================================");
   }
 
-  private getAuthHeaders(): HeadersInit {
-    if (typeof window === "undefined") {
-      return {
-        "Content-Type": "application/json",
-      };
-    }
+  // Helper to clear old authentication data
+  public clearOldAuthData(): void {
+    if (typeof window === "undefined") return;
 
-    const storedAuth = localStorage.getItem("__admin_auth_v1");
-    if (storedAuth) {
-      try {
-        const admin = JSON.parse(storedAuth) as { email: string };
-        // Create the token format expected by the backend
-        const token = btoa(JSON.stringify({ email: admin.email }));
-        return {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        };
-      } catch {
-        // Invalid stored auth, continue without headers
-        console.error("Invalid admin auth data in localStorage");
-      }
-    }
+    console.log("Clearing old authentication data...");
+    localStorage.removeItem("__admin_auth_v1");
+    sessionStorage.removeItem("__admin_password_v1");
+    sessionStorage.removeItem("__access_token_v2"); // Remove old token storage
+    console.log("Old auth data cleared. Please refresh and log in again.");
+  }
+
+  private getAuthHeaders(): HeadersInit {
     return {
       "Content-Type": "application/json",
+    };
+  }
+
+  private getRequestOptions(options: RequestInit = {}): RequestInit {
+    return {
+      ...options,
+      headers: {
+        ...this.getAuthHeaders(),
+        ...options.headers,
+      },
+      credentials: "include", // Include cookies for authentication
     };
   }
 
   // Admin Authentication
   async loginAdmin(email: string, password: string): Promise<AdminUser | null> {
     try {
-      // First verify credentials
-      const verifyResponse = await fetch("/api/admins/verify", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email, password }),
-      });
+      // First verify credentials - cookies will be set automatically by the server
+      const verifyResponse = await fetch(
+        "/api/admins/verify",
+        this.getRequestOptions({
+          method: "POST",
+          body: JSON.stringify({ email, password }),
+        })
+      );
 
       if (!verifyResponse.ok) {
         return null;
@@ -87,7 +93,7 @@ class AdminApi {
 
   async getAdminByEmail(email: string): Promise<AdminUser | null> {
     try {
-      const response = await fetch(`/api/admins?email=${encodeURIComponent(email)}`);
+      const response = await fetch(`/api/admins?email=${encodeURIComponent(email)}`, this.getRequestOptions());
 
       if (!response.ok) {
         return null;
@@ -103,13 +109,13 @@ class AdminApi {
 
   async verifyAdminToken(email: string, token: string): Promise<AdminUser | null> {
     try {
-      const response = await fetch("/api/admins/verify-token", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email, token }),
-      });
+      const response = await fetch(
+        "/api/admins/verify-token",
+        this.getRequestOptions({
+          method: "POST",
+          body: JSON.stringify({ email, token }),
+        })
+      );
 
       if (!response.ok) {
         return null;
@@ -126,9 +132,7 @@ class AdminApi {
   // Admin Management
   async getAllAdmins(): Promise<AdminUser[]> {
     try {
-      const response = await fetch("/api/admins", {
-        headers: this.getAuthHeaders(),
-      });
+      const response = await fetch("/api/admins", this.getRequestOptions());
 
       if (!response.ok) {
         console.error("Error fetching admins:", response.statusText);
@@ -147,7 +151,7 @@ class AdminApi {
     try {
       const response = await fetch("/api/admins", {
         method: "POST",
-        headers: this.getAuthHeaders(),
+        ...this.getRequestOptions(),
         body: JSON.stringify(adminData),
       });
 
@@ -190,7 +194,7 @@ class AdminApi {
       if (params?.page) queryParams.append("page", params.page.toString());
 
       const response = await fetch(`/api/features?${queryParams.toString()}`, {
-        headers: this.getAuthHeaders(),
+        ...this.getRequestOptions(),
       });
 
       if (!response.ok) {
@@ -206,44 +210,15 @@ class AdminApi {
     }
   }
 
-  async updateFeatureStatus(featureId: string, status: string, adminCredentials?: { email: string; password: string }): Promise<boolean> {
+  async updateFeatureStatus(featureId: string, status: string): Promise<boolean> {
     try {
-      // Get admin credentials from localStorage if not provided
-      let credentials = adminCredentials;
-      if (!credentials) {
-        const storedAuth = localStorage.getItem("__admin_auth_v1");
-        if (storedAuth) {
-          try {
-            const admin = JSON.parse(storedAuth) as { email: string };
-            // For now, we'll need to get the password from sessionStorage
-            // This is a temporary solution until the API is properly refactored
-            const storedPassword = sessionStorage.getItem("__admin_password_v1");
-            if (storedPassword) {
-              credentials = { email: admin.email, password: storedPassword };
-            }
-          } catch {
-            console.error("Error getting admin credentials from storage");
-            return false;
-          }
-        }
-      }
-
-      if (!credentials) {
-        console.error("Admin credentials not available. Please ensure you are logged in as an admin.");
-        console.log("localStorage keys:", typeof window !== "undefined" ? Object.keys(localStorage) : "N/A");
-        console.log("sessionStorage keys:", typeof window !== "undefined" ? Object.keys(sessionStorage) : "N/A");
-        return false;
-      }
-
-      const response = await fetch(`/api/features/${featureId}`, {
-        method: "PATCH",
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify({
-          status,
-          admin_email: credentials.email,
-          admin_password: credentials.password,
-        }),
-      });
+      const response = await fetch(
+        `/api/features/${featureId}`,
+        this.getRequestOptions({
+          method: "PATCH",
+          body: JSON.stringify({ status }),
+        })
+      );
 
       return response.ok;
     } catch (error) {
@@ -252,54 +227,14 @@ class AdminApi {
     }
   }
 
-  async deleteFeature(featureId: string, adminCredentials?: { email: string; password: string }): Promise<boolean> {
+  async deleteFeature(featureId: string): Promise<boolean> {
     try {
-      // Get admin credentials from localStorage if not provided
-      let credentials = adminCredentials;
-      if (!credentials) {
-        // Check if we're in browser environment
-        if (typeof window === "undefined") {
-          console.error("Cannot access localStorage in server environment");
-          return false;
-        }
-
-        const storedAuth = localStorage.getItem("__admin_auth_v1");
-        if (storedAuth) {
-          try {
-            const admin = JSON.parse(storedAuth) as { email: string };
-            // For now, we'll need to get the password from sessionStorage
-            // This is a temporary solution until the API is properly refactored
-            const storedPassword = sessionStorage.getItem("__admin_password_v1");
-            if (storedPassword) {
-              credentials = { email: admin.email, password: storedPassword };
-              console.log("Found credentials for admin:", admin.email);
-            } else {
-              console.error("Admin password not found in sessionStorage");
-            }
-          } catch (error) {
-            console.error("Error parsing admin data from localStorage:", error);
-            return false;
-          }
-        } else {
-          console.error("Admin authentication data not found in localStorage");
-        }
-      }
-
-      if (!credentials) {
-        console.error("Admin credentials not available. Please ensure you are logged in as an admin.");
-        console.log("localStorage keys:", typeof window !== "undefined" ? Object.keys(localStorage) : "N/A");
-        console.log("sessionStorage keys:", typeof window !== "undefined" ? Object.keys(sessionStorage) : "N/A");
-        return false;
-      }
-
-      const response = await fetch(`/api/features/${featureId}`, {
-        method: "DELETE",
-        headers: this.getAuthHeaders(),
-        body: JSON.stringify({
-          admin_email: credentials.email,
-          admin_password: credentials.password,
-        }),
-      });
+      const response = await fetch(
+        `/api/features/${featureId}`,
+        this.getRequestOptions({
+          method: "DELETE",
+        })
+      );
 
       return response.ok;
     } catch (error) {
@@ -364,7 +299,7 @@ class AdminApi {
   }> {
     try {
       const response = await fetch("/api/trends", {
-        headers: this.getAuthHeaders(),
+        ...this.getRequestOptions(),
       });
 
       if (!response.ok) {
@@ -384,7 +319,7 @@ class AdminApi {
     try {
       const response = await fetch("/api/trends", {
         method: "POST",
-        headers: this.getAuthHeaders(),
+        ...this.getRequestOptions(),
       });
 
       return response.ok;

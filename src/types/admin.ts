@@ -3,8 +3,10 @@ export interface AdminUser {
   name: string;
   email: string;
   image_url?: string | null;
+  role: "admin" | "user";
   created_at: string;
   updated_at: string;
+  isDefaultPassword?: boolean;
 }
 
 export interface FeatureRequest {

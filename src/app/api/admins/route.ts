@@ -1,7 +1,8 @@
 // API: GET list admins / POST create admin
 import { type NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
-import { addAdmin, getAllAdmins, isRequesterAdmin } from "@/lib/utils/admin";
+import { addAdmin, getAllAdmins } from "@/lib/utils/admin";
+import { requireAdmin, addSecurityHeaders, createAuthErrorResponse } from "@/lib/auth/middleware";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -28,19 +29,16 @@ export async function GET(req: NextRequest) {
 
   // If no admins exist, allow anyone to see the empty list (for first-time setup)
   if (admins.length === 0) {
-    return NextResponse.json({ admins: [] });
+    return addSecurityHeaders(NextResponse.json({ admins: [] }));
   }
 
   // Check if requester is admin (only if admins exist)
-  const isAdmin = await isRequesterAdmin();
-  if (!isAdmin) {
-    return NextResponse.json(
-      { error: "Admin access required" },
-      { status: 403 },
-    );
+  const authResult = await requireAdmin(req);
+  if (!authResult.success) {
+    return createAuthErrorResponse(authResult.error || "Admin access required", 403);
   }
 
-  return NextResponse.json({ admins });
+  return addSecurityHeaders(NextResponse.json({ admins }));
 }
 
 export async function POST(req: NextRequest) {
@@ -73,12 +71,9 @@ export async function POST(req: NextRequest) {
 
   if (existingAdmins.length > 0) {
     // If admins exist, check if requester is admin
-    const isAdmin = await isRequesterAdmin();
-    if (!isAdmin) {
-      return NextResponse.json(
-        { error: "Admin access required" },
-        { status: 403 },
-      );
+    const authResult = await requireAdmin(req);
+    if (!authResult.success) {
+      return createAuthErrorResponse(authResult.error || "Admin access required", 403);
     }
   } else {
     // First admin being created - allow it
@@ -87,8 +82,8 @@ export async function POST(req: NextRequest) {
 
   const newAdmin = await addAdmin(email, name, image_url, password);
   if (!newAdmin) {
-    return NextResponse.json({ error: "Failed to add admin" }, { status: 500 });
+    return createAuthErrorResponse("Failed to add admin", 500);
   }
 
-  return NextResponse.json({ admin: newAdmin });
+  return addSecurityHeaders(NextResponse.json({ admin: newAdmin }));
 }

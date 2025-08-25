@@ -4,16 +4,17 @@ import type React from "react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { AdminUser } from "@/types/admin";
 
-const STORAGE_KEY = "__admin_auth_v1";
+const STORAGE_KEY = "__admin_auth_v2";
+
 type LoginResult = { success: true; admin: AdminUser } | { success: false; error?: string };
 
 type Ctx = {
   currentAdmin: AdminUser | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<LoginResult>;
-  logout: () => void;
-  refreshAuth: () => void;
+  login: (email: string, password: string, rememberMe?: boolean) => Promise<LoginResult>;
+  logout: () => Promise<void>;
+  refreshAuth: () => Promise<void>;
 };
 
 const AdminAuthContext = createContext<Ctx | undefined>(undefined);
@@ -59,48 +60,83 @@ export function AdminAuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const login = useCallback(
-    async (email: string, password: string): Promise<LoginResult> => {
+    async (email: string, password: string, rememberMe = false): Promise<LoginResult> => {
       try {
         const res = await fetch("/api/admins/verify", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ email, password, rememberMe }),
+          credentials: "include", // Include cookies in the request
         });
+
         if (!res.ok) {
           const js = await res.json().catch(() => ({}));
-          return { success: false, error: js.error || "Invalid credentials" };
+          const error = new Error(js.error || "Invalid credentials");
+          (error as any).status = res.status;
+          (error as any).response = { status: res.status, data: js };
+          throw error;
         }
+
         const js = await res.json();
         const admin: AdminUser = js.admin;
-        setCurrentAdmin(admin); // in-memory
-        persist(admin); // localStorage + broadcast
 
-        // Store password in sessionStorage for API calls that require it
-        // This is a temporary solution until the API is properly refactored
-        if (typeof window !== "undefined") {
-          sessionStorage.setItem("__admin_password_v1", password);
-        }
+        setCurrentAdmin(admin);
+        persist(admin);
 
         return { success: true, admin };
-      } catch {
-        return { success: false, error: "Network error" };
+      } catch (error) {
+        // Return the actual error message instead of generic "Network error"
+        const errorMessage = error instanceof Error ? error.message : "Network error";
+        return { success: false, error: errorMessage };
       }
     },
     [persist]
   );
 
-  const logout = useCallback(() => {
-    setCurrentAdmin(null);
-    persist(null);
-    // Clear stored password from sessionStorage
-    if (typeof window !== "undefined") {
-      sessionStorage.removeItem("__admin_password_v1");
+  const logout = useCallback(async () => {
+    try {
+      // Call logout endpoint to revoke tokens (cookies will be sent automatically)
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include", // Include cookies in the request
+      });
+    } catch (error) {
+      console.error("Logout API error:", error);
+    } finally {
+      // Always clear local state regardless of API call success
+      setCurrentAdmin(null);
+      persist(null);
     }
   }, [persist]);
 
-  const refreshAuth = useCallback(() => {
-    hydrate();
-  }, [hydrate]);
+  const refreshAuth = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include", // Include cookies in the request
+      });
+
+      if (res.ok) {
+        const js = await res.json();
+        const admin: AdminUser = js.admin;
+
+        setCurrentAdmin(admin);
+        persist(admin);
+      } else {
+        // Refresh failed, clear auth state
+        setCurrentAdmin(null);
+        persist(null);
+      }
+    } catch (error) {
+      console.error("Refresh auth error:", error);
+      setCurrentAdmin(null);
+      persist(null);
+    }
+  }, [persist]);
 
   const value = useMemo<Ctx>(
     () => ({

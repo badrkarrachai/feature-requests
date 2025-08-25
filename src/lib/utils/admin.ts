@@ -1,5 +1,6 @@
 import { headers } from "next/headers";
 import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
+import { authenticateServerRequest, type AuthResult } from "@/lib/auth/middleware";
 
 export interface AdminUser {
   id: string;
@@ -8,31 +9,46 @@ export interface AdminUser {
   image_url?: string;
   created_at: string;
   updated_at: string;
+  role: "admin" | "user";
+}
+
+/**
+ * Get the authenticated user from JWT token
+ */
+export async function getAuthenticatedUser(): Promise<AdminUser | null> {
+  try {
+    const authResult = await authenticateServerRequest();
+
+    if (!authResult.success || !authResult.user) {
+      return null;
+    }
+
+    // Fetch fresh user data from database
+    const { data: user, error } = await supabaseAdmin
+      .from("users")
+      .select("id, name, email, image_url, role, created_at, updated_at")
+      .eq("id", authResult.user.sub)
+      .single();
+
+    if (error || !user) {
+      return null;
+    }
+
+    return user as AdminUser;
+  } catch (error) {
+    console.error("Error getting authenticated user:", error);
+    return null;
+  }
 }
 
 /**
  * Get the email from the current request's authorization header
- * Note: This uses a simplified auth system for demo purposes
- * In production, you should use proper JWT authentication
+ * @deprecated Use getAuthenticatedUser() instead for better security
  */
 export async function getRequesterEmail(): Promise<string | null> {
   try {
-    const headersList = await headers();
-    const authHeader = headersList.get("authorization");
-
-    if (!authHeader) {
-      return null;
-    }
-
-    // Extract base64 encoded user data from Bearer header
-    const encodedData = authHeader.replace("Bearer ", "");
-
-    try {
-      const decodedData = JSON.parse(atob(encodedData));
-      return decodedData.email || null;
-    } catch {
-      return null;
-    }
+    const user = await getAuthenticatedUser();
+    return user?.email || null;
   } catch (error) {
     console.error("Error getting requester email:", error);
     return null;
@@ -44,11 +60,7 @@ export async function getRequesterEmail(): Promise<string | null> {
  */
 export async function getUserIdByEmail(email: string): Promise<string | null> {
   try {
-    const { data: user, error } = await supabaseAdmin
-      .from("users")
-      .select("id")
-      .eq("email", email.toLowerCase())
-      .single();
+    const { data: user, error } = await supabaseAdmin.from("users").select("id").eq("email", email.toLowerCase()).single();
 
     if (error || !user) {
       return null;
@@ -63,28 +75,17 @@ export async function getUserIdByEmail(email: string): Promise<string | null> {
 
 /**
  * Check if the current requester is an admin
- * Uses the users table with role = 'admin'
+ * Uses JWT token authentication
  */
 export async function isRequesterAdmin(): Promise<boolean> {
   try {
-    const email = await getRequesterEmail();
-    if (!email) {
+    const authResult = await authenticateServerRequest();
+
+    if (!authResult.success || !authResult.user) {
       return false;
     }
 
-    // Query users table for admin role
-    const { data: user, error } = await supabaseAdmin
-      .from("users")
-      .select("id")
-      .eq("email", email.toLowerCase())
-      .eq("role", "admin")
-      .single();
-
-    if (error || !user) {
-      return false;
-    }
-
-    return true;
+    return authResult.user.role === "admin";
   } catch (error) {
     console.error("Error checking admin status:", error);
     return false;
@@ -92,27 +93,17 @@ export async function isRequesterAdmin(): Promise<boolean> {
 }
 
 /**
- * Get admin user details using custom auth system
+ * Get admin user details using JWT authentication
  */
 export async function getAdminUser(): Promise<AdminUser | null> {
   try {
-    const email = await getRequesterEmail();
-    if (!email) {
+    const user = await getAuthenticatedUser();
+
+    if (!user || user.role !== "admin") {
       return null;
     }
 
-    const { data: admin, error } = await supabaseAdmin
-      .from("users")
-      .select("*")
-      .eq("email", email.toLowerCase())
-      .eq("role", "admin")
-      .single();
-
-    if (error || !admin) {
-      return null;
-    }
-
-    return admin as AdminUser;
+    return user;
   } catch (error) {
     console.error("Error getting admin user:", error);
     return null;
@@ -126,7 +117,7 @@ export async function getAllAdmins(): Promise<AdminUser[]> {
   try {
     const { data: admins, error } = await supabaseAdmin
       .from("users")
-      .select("*")
+      .select("id, name, email, image_url, role, created_at, updated_at")
       .eq("role", "admin")
       .order("created_at", { ascending: false });
 
@@ -145,12 +136,7 @@ export async function getAllAdmins(): Promise<AdminUser[]> {
 /**
  * Add a new admin using the admin_upsert RPC function
  */
-export async function addAdmin(
-  email: string,
-  name: string,
-  imageUrl?: string,
-  password?: string,
-): Promise<AdminUser | null> {
+export async function addAdmin(email: string, name: string, imageUrl?: string, password?: string): Promise<AdminUser | null> {
   try {
     // Use the admin_upsert RPC function from the database
     const { data: userId, error } = await supabaseAdmin.rpc("admin_upsert", {
@@ -166,11 +152,7 @@ export async function addAdmin(
     }
 
     // Get the created admin user
-    const { data: admin, error: fetchError } = await supabaseAdmin
-      .from("users")
-      .select("*")
-      .eq("id", userId)
-      .single();
+    const { data: admin, error: fetchError } = await supabaseAdmin.from("users").select("*").eq("id", userId).single();
 
     if (fetchError || !admin) {
       console.error("Error fetching created admin:", fetchError);
@@ -185,27 +167,47 @@ export async function addAdmin(
 }
 
 /**
- * Verify admin credentials using the verify_admin_return_id RPC function
+ * Verify admin credentials securely with rate limiting protection
  */
-export async function verifyAdminCredentials(
-  email: string,
-  password: string,
-): Promise<string | null> {
+export async function verifyAdminCredentials(email: string, password: string): Promise<(AdminUser & { isDefaultPassword?: boolean }) | null> {
   try {
-    const { data: userId, error } = await supabaseAdmin.rpc(
-      "verify_admin_return_id",
-      {
-        p_email: email.toLowerCase(),
-        p_password: password,
-      },
-    );
+    // Use the database's built-in verification function which uses the same crypt() function
+    // that was used to hash the password
+    const { data: adminId, error } = await supabaseAdmin.rpc("verify_admin_return_id", {
+      p_email: email,
+      p_password: password,
+    });
 
-    if (error || !userId) {
-      console.error("Error verifying admin credentials:", error);
+    if (error) {
+      console.error("Admin verification error:", error);
       return null;
     }
 
-    return userId;
+    if (!adminId) {
+      return null;
+    }
+
+    // Get the admin user details
+    const { data: admin, error: fetchError } = await supabaseAdmin
+      .from("users")
+      .select("id, name, email, image_url, role, created_at, updated_at")
+      .eq("id", adminId)
+      .eq("role", "admin")
+      .single();
+
+    if (fetchError || !admin) {
+      console.error("Error fetching admin details:", fetchError);
+      return null;
+    }
+
+    // Check if this is the default admin account with default password
+    const isDefaultAccount = admin.email === "admin@admin.com";
+    const isDefaultPassword = isDefaultAccount && password === "admin";
+
+    return {
+      ...(admin as AdminUser),
+      isDefaultPassword,
+    };
   } catch (error) {
     console.error("Error verifying admin credentials:", error);
     return null;

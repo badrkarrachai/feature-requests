@@ -13,14 +13,13 @@ function toSlug(input: string): FeatureStatus | null {
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
 
+  // Verify admin authentication using JWT
   if (!(await isRequesterAdmin())) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403 });
   }
 
   const body = (await req.json().catch(() => ({}))) as {
     status?: string;
-    admin_email?: string;
-    admin_password?: string;
   };
 
   const status = body.status ? toSlug(body.status) : null;
@@ -32,16 +31,14 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
       { status: 400 }
     );
   }
-  if (!body.admin_email || !body.admin_password) {
-    return NextResponse.json({ error: "admin_email and admin_password required" }, { status: 400 });
-  }
 
-  const { data, error } = await supabaseAdmin.rpc("admin_update_feature_status", {
-    p_admin_email: body.admin_email.toLowerCase(),
-    p_password: body.admin_password,
-    p_feature_id: id,
-    p_new_status: status, // text slug now
-  });
+  // Update feature status directly using admin privileges
+  const { data, error } = await supabaseAdmin
+    .from("features")
+    .update({ status_id: getStatusId(status) })
+    .eq("id", id)
+    .select("*, users!inner(name, email, image_url)")
+    .single();
 
   if (error) {
     console.error("Error updating feature status:", error);
@@ -52,43 +49,31 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   return NextResponse.json({ item: data });
 }
 
+// Helper to get status ID from slug
+function getStatusId(slug: string): number {
+  const statusMap: Record<string, number> = {
+    under_review: 1,
+    planned: 2,
+    in_progress: 3,
+    done: 4,
+  };
+  return statusMap[slug] || 1;
+}
+
 export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
 
-  // Check if requester is admin
-  const isAdmin = await isRequesterAdmin();
-  if (!isAdmin) {
+  // Verify admin authentication using JWT
+  if (!(await isRequesterAdmin())) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403 });
   }
 
-  let body: { admin_email?: string; admin_password?: string } = {};
-  try {
-    body = await req.json();
-  } catch {}
-
-  const { admin_email, admin_password } = body as {
-    admin_email?: string;
-    admin_password?: string;
-  };
-
-  if (!admin_email || !admin_password) {
-    return NextResponse.json({ error: "admin_email and admin_password required" }, { status: 400 });
-  }
-
-  // Use the admin_delete_feature RPC function
-  const { data: success, error } = await supabaseAdmin.rpc("admin_delete_feature", {
-    p_admin_email: admin_email.toLowerCase(),
-    p_password: admin_password,
-    p_feature_id: id,
-  });
+  // Delete feature directly using admin privileges
+  const { error } = await supabaseAdmin.from("features").delete().eq("id", id);
 
   if (error) {
     console.error("Error deleting feature:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-
-  if (!success) {
-    return NextResponse.json({ error: "Feature not found or invalid admin credentials" }, { status: 404 });
   }
 
   return NextResponse.json({ success: true });

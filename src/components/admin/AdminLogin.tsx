@@ -1,6 +1,7 @@
 "use client";
 
 import { Eye, EyeOff, Lock, Mail, Shield } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
 import type React from "react";
 import { useEffect, useState } from "react";
 import { useAdminAuth } from "@/hooks/useAdminAuth";
@@ -18,8 +19,14 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
     password: "",
     showPassword: false,
   });
+  const [rememberMe, setRememberMe] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rateLimitInfo, setRateLimitInfo] = useState<{
+    remaining: number;
+    resetTime: Date | null;
+    maxAttempts: number;
+  } | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -32,11 +39,12 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
     e.preventDefault();
     setIsLoading(true);
     setError(null);
+    setRateLimitInfo(null);
 
     const { email, password } = loginForm;
 
     try {
-      const result = await login(email, password);
+      const result = await login(email, password, rememberMe);
       if (result.success) {
         onLoginSuccess(result.admin); // ← use admin from the result (fresh), not a stale hook read
         toast.success("Successfully logged in!");
@@ -45,8 +53,24 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
         setError(errorMessage);
         toast.error(errorMessage);
       }
-    } catch {
-      const errorMessage = "Login failed. Please try again.";
+    } catch (error: any) {
+      let errorMessage = "Login failed. Please try again.";
+
+      // Handle rate limiting specifically
+      if (error?.status === 429 || error?.response?.status === 429) {
+        const rateLimitData = error.response?.data || error.data;
+        if (rateLimitData) {
+          errorMessage = rateLimitData.error;
+          setRateLimitInfo({
+            remaining: rateLimitData.remainingAttempts || 0,
+            resetTime: rateLimitData.resetTime ? new Date(rateLimitData.resetTime) : null,
+            maxAttempts: rateLimitData.maxAttempts || 5,
+          });
+        } else {
+          errorMessage = "Too many login attempts. Please wait before trying again.";
+        }
+      }
+
       setError(errorMessage);
       toast.error(errorMessage);
     } finally {
@@ -114,9 +138,28 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
               </div>
             </div>
 
+            <div className="flex items-center space-x-2">
+              <Checkbox id="rememberMe" checked={rememberMe} onCheckedChange={(checked) => setRememberMe(checked === true)} />
+              <label htmlFor="rememberMe" className="text-sm text-foreground cursor-pointer">
+                Remember me for 30 days
+              </label>
+            </div>
+
             {error && (
               <div className="bg-destructive/10 border border-destructive/20 rounded-xl p-3">
                 <p className="text-destructive text-sm">{error}</p>
+                {rateLimitInfo && (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {rateLimitInfo.remaining > 0 ? (
+                      <p>{rateLimitInfo.remaining} attempts remaining</p>
+                    ) : (
+                      <p>
+                        Rate limit exceeded. Try again{" "}
+                        {rateLimitInfo.resetTime && <span className="font-medium">{new Date(rateLimitInfo.resetTime).toLocaleTimeString()}</span>}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
