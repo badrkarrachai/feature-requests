@@ -532,7 +532,7 @@ export function FeaturesManagement() {
     <>
       <div className="space-y-6">
         {/* Search and Filters */}
-        <div className="bg-card rounded-2xl p-6 border border-border shadow-sm">
+        <div className="bg-card rounded-2xl p-6 border border-border shadow-xs">
           <div className="space-y-4">
             {/* Search Input */}
             <div className="relative">
@@ -542,7 +542,7 @@ export function FeaturesManagement() {
                 placeholder="Search features..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-10 pr-20 h-11" // Increased right padding for buttons
+                className="pl-10 pr-20 h-11 bg-background" // Increased right padding for buttons
               />
 
               {/* Right side - Loading + Clear button */}
@@ -681,7 +681,7 @@ export function FeaturesManagement() {
                 return (
                   <div
                     key={`feature-${feature.id}`}
-                    className="bg-card rounded-2xl p-4 sm:p-6 border border-border shadow-sm hover:shadow-md transition-shadow"
+                    className="bg-card rounded-2xl p-4 sm:p-6 border border-border shadow-xs hover:shadow-sm transition-shadow"
                   >
                     {/* Mobile: Column layout, Desktop: Row layout */}
                     <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 lg:gap-6">
@@ -741,7 +741,7 @@ export function FeaturesManagement() {
                             size="sm"
                             onClick={() => handleDeleteFeature(feature.id, feature.title)}
                             disabled={isUpdating === feature.id}
-                            className="w-full px-3 py-2 h-9 border-destructive/20 text-destructive hover:bg-destructive/10 hover:border-destructive/30 transition-colors"
+                            className="w-full px-3 py-2 h-9 border-destructive/20 text-destructive hover:text-destructive hover:bg-destructive/10 hover:border-destructive/30 transition-colors"
                             title="Delete feature"
                           >
                             <div className="flex items-center justify-center gap-1">
@@ -807,7 +807,7 @@ export function FeaturesManagement() {
 
       {/* Delete Confirmation Dialog */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-        <AlertDialogContent>
+        <AlertDialogContent className="bg-white dark:bg-[#121212]">
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Feature Request</AlertDialogTitle>
             <AlertDialogDescription>Are you sure you want to delete "{featureToDelete?.title}"? This action cannot be undone.</AlertDialogDescription>

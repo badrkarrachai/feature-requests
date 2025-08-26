@@ -236,7 +236,7 @@ export default function TopBar(props: {
   return (
     <div>
       <div className="font-semibold mb-5 text-lg">Feature Requests</div>
-      <div className="flex items-center justify-between gap-4 relative bg-[#fcfcfc] border px-3 py-3 rounded-t-xl ">
+      <div className="flex items-center justify-between gap-4 relative bg-[#fcfcfc] border border-gray-200 border-b-0 px-3 py-3 rounded-t-xl">
         {/* Left side - Dropdown Menu (fixed width) */}
         {!isSearching && (
           <div className="flex-shrink-0">

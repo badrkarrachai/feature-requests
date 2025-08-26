@@ -1,6 +1,6 @@
 "use client";
 
-import { Eye, EyeOff, Plus, Shield, Users } from "lucide-react";
+import { Eye, EyeOff, Plus, Shield, Trash2, Users } from "lucide-react";
 import type React from "react";
 import { useEffect, useState } from "react";
 import { adminApi } from "@/services/adminApi";
@@ -9,6 +9,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { toast } from "sonner";
 import { CheckCircle, AlertCircle } from "lucide-react";
@@ -28,6 +39,8 @@ export function AdminsManagement() {
     type: "success" | "error" | "info";
     message: string;
   } | null>(null);
+  const [adminToDelete, setAdminToDelete] = useState<AdminUser | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     loadAdmins();
@@ -94,6 +107,33 @@ export function AdminsManagement() {
     }
   };
 
+  const handleRemoveAdmin = async () => {
+    if (!adminToDelete) return;
+
+    try {
+      setIsDeleting(true);
+      const result = await adminApi.removeAdmin(adminToDelete.id);
+
+      if (result.success) {
+        // Remove the admin from the local state (they're no longer an admin)
+        setAdmins((prev) => prev.filter((admin) => admin.id !== adminToDelete.id));
+        toast.success(result.message);
+        // Use persistent alert for important system messages
+        showPersistentAlert("success", `Admin ${adminToDelete.name} has been demoted to user. They can no longer access admin features.`);
+      } else {
+        toast.error(result.message);
+        showPersistentAlert("error", result.message);
+      }
+    } catch (error) {
+      console.error("Error removing admin:", error);
+      toast.error("Failed to remove admin");
+      showPersistentAlert("error", "An unexpected error occurred while removing admin privileges.");
+    } finally {
+      setIsDeleting(false);
+      setAdminToDelete(null);
+    }
+  };
+
   return (
     <>
       <div className="space-y-6">
@@ -107,7 +147,7 @@ export function AdminsManagement() {
               </Button>
             </DialogTrigger>
 
-            <DialogContent className="sm:max-w-[425px]">
+            <DialogContent className="sm:max-w-[425px] bg-white dark:bg-[#121212]">
               <DialogHeader>
                 <DialogTitle>Add New Admin</DialogTitle>
                 <DialogDescription>Create a new administrator account. The admin will have full access to the system.</DialogDescription>
@@ -123,7 +163,7 @@ export function AdminsManagement() {
                     onChange={(e) => setNewAdmin((prev) => ({ ...prev, name: e.target.value }))}
                     placeholder="Admin Name"
                     required
-                    className="h-10"
+                    className="h-10 bg-slate-50"
                   />
                 </div>
 
@@ -136,7 +176,7 @@ export function AdminsManagement() {
                     onChange={(e) => setNewAdmin((prev) => ({ ...prev, email: e.target.value }))}
                     placeholder="admin@example.com"
                     required
-                    className="h-10"
+                    className="h-10 bg-slate-50"
                   />
                 </div>
 
@@ -155,7 +195,7 @@ export function AdminsManagement() {
                       }
                       placeholder="••••••••"
                       required
-                      className="h-10"
+                      className="h-10 bg-slate-50"
                     />
                     <button
                       type="button"
@@ -189,7 +229,7 @@ export function AdminsManagement() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {isLoading ? (
             Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="bg-card rounded-2xl p-6 border border-border shadow-sm animate-pulse">
+              <div key={i} className="bg-card rounded-2xl p-6 border border-border shadow-xs animate-pulse">
                 <div className="flex items-start gap-4">
                   <div className="w-14 h-14 bg-muted rounded-xl"></div>
                   <div className="flex-1 space-y-2">
@@ -208,7 +248,7 @@ export function AdminsManagement() {
             </div>
           ) : (
             admins.map((admin) => (
-              <div key={admin.id} className="bg-card rounded-2xl p-5 border border-border shadow-sm hover:shadow-md transition-shadow">
+              <div key={admin.id} className="bg-card rounded-2xl p-5 border border-border shadow-xs hover:shadow-sm transition-shadow">
                 <div className="flex items-center gap-4">
                   <div className="w-14 h-14 bg-primary rounded-xl flex items-center justify-center">
                     <span className="text-white dark:text-primary-foreground font-semibold text-xl">
@@ -227,6 +267,39 @@ export function AdminsManagement() {
                       <span className="text-xs text-green-600 dark:text-green-400 font-medium">Administrator</span>
                     </div>
                     <p className="text-xs text-muted-foreground mt-2">Added {new Date(admin.created_at).toLocaleDateString()}</p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-9 w-9 p-2 border-destructive/20 text-destructive hover:text-destructive hover:bg-destructive/10 hover:border-destructive/30 transition-colors"
+                          onClick={() => setAdminToDelete(admin)}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent className="bg-white dark:bg-[#121212]">
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Remove Admin</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Are you sure you want to remove admin privileges from <strong>{admin.name}</strong> ({admin.email})? This action will
+                            demote them to a regular user and they will lose access to all admin features.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={handleRemoveAdmin}
+                            disabled={isDeleting}
+                            className="bg-destructive text-white hover:bg-destructive/90"
+                          >
+                            {isDeleting ? "Removing..." : "Remove Admin"}
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
                   </div>
                 </div>
               </div>

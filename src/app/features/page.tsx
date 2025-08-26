@@ -26,7 +26,7 @@ type ApiPage = {
 
 // Enhanced Loading Components
 const FeatureCardSkeleton = () => (
-  <div className="bg-white rounded-lg border border-gray-200 p-4 animate-pulse">
+  <div className="bg-white  border border-gray-200 p-4 animate-pulse">
     <div className="flex items-start space-x-3">
       <div className="flex flex-col items-center space-y-1">
         <div className="w-8 h-6 bg-gray-200 rounded"></div>
@@ -74,20 +74,10 @@ const LoadingSpinner = ({ size = "sm", className = "" }: LoadingSpinnerProps) =>
 };
 
 const InitialLoader = () => (
-  <div className="space-y-4">
-    <div className="flex items-center justify-center py-8">
-      <div className="flex flex-col items-center space-y-3">
-        <LoadingSpinner size="lg" className="text-blue-600" />
-        <div className="text-sm text-gray-600 font-medium">Loading features...</div>
-        <div className="text-xs text-gray-400">This won't take long</div>
-      </div>
-    </div>
-    {/* Show skeleton cards */}
-    <div className="space-y-3">
-      {[...Array(3)].map((_, i) => (
-        <FeatureCardSkeleton key={i} />
-      ))}
-    </div>
+  <div className="space-y-0">
+    {[...Array(5)].map((_, i) => (
+      <FeatureCardSkeleton key={i} />
+    ))}
   </div>
 );
 
@@ -575,6 +565,8 @@ function FeaturesPageContent() {
                 searchterm={shouldHighlight ? lastSearchTerm : ""}
                 onOpenNew={() => setOpen(true)}
                 pendingVotes={pendingVotes}
+                email={email}
+                name={name}
               />
             </div>
 

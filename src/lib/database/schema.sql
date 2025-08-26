@@ -1619,3 +1619,501 @@ revoke execute on function public.cleanup_old_notifications()                   
 -- select jobid, jobname, schedule, command from cron.job where jobname='trends_hourly';
 -- select * from public.trends_latest order by metric_name;
 -- select * from public.trends order by period_end desc, metric_name;
+
+
+
+-- =========================================
+-- COMMENTS: replies + likes + soft delete
+-- =========================================
+
+-- 0) Columns on comments
+alter table public.comments
+  add column if not exists parent_id    uuid references public.comments(id) on delete set null,
+  add column if not exists is_deleted   boolean not null default false,
+  add column if not exists deleted_at   timestamptz,
+  add column if not exists edited_at    timestamptz,
+  add column if not exists likes_count  integer not null default 0,
+  add column if not exists replies_count integer not null default 0;
+
+-- Simple safety: parent cannot reference self
+do $$ begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'comments_parent_not_self'
+  ) then
+    alter table public.comments
+      add constraint comments_parent_not_self check (parent_id is null or parent_id <> id);
+  end if;
+end $$;
+
+-- 1) Reactions table (only 'like' for now; easy to add more later)
+create table if not exists public.comment_reactions (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references public.users(id) on delete cascade,
+  comment_id uuid not null references public.comments(id) on delete cascade,
+  reaction   text not null check (reaction in ('like')),
+  created_at timestamptz not null default now(),
+  unique (comment_id, user_id, reaction)
+);
+
+-- Helpful indexes
+create index if not exists idx_comments_feature_created
+  on public.comments (feature_id, created_at desc)
+  where parent_id is null and is_deleted = false;
+
+create index if not exists idx_replies_parent_created
+  on public.comments (parent_id, created_at asc)
+  where is_deleted = false;
+
+create index if not exists idx_comment_reactions_comment
+  on public.comment_reactions(comment_id);
+
+-- 2) Count sync triggers
+create or replace function public.sync_comment_likes_count()
+returns trigger language plpgsql as $$
+begin
+  if tg_op = 'INSERT' then
+    update public.comments set likes_count = likes_count + 1 where id = new.comment_id;
+  elsif tg_op = 'DELETE' then
+    update public.comments set likes_count = greatest(likes_count - 1, 0) where id = old.comment_id;
+  end if;
+  return null;
+end $$;
+
+drop trigger if exists trg_comment_likes_sync on public.comment_reactions;
+create trigger trg_comment_likes_sync
+after insert or delete on public.comment_reactions
+for each row execute procedure public.sync_comment_likes_count();
+
+create or replace function public.sync_replies_count()
+returns trigger language plpgsql as $$
+begin
+  -- Only affect parent rows when this row is a reply
+  if tg_op = 'INSERT' and new.parent_id is not null then
+    update public.comments set replies_count = replies_count + 1 where id = new.parent_id;
+  elsif tg_op = 'DELETE' and old.parent_id is not null then
+    update public.comments set replies_count = greatest(replies_count - 1, 0) where id = old.parent_id;
+  end if;
+  return null;
+end $$;
+
+drop trigger if exists trg_replies_sync on public.comments;
+create trigger trg_replies_sync
+after insert or delete on public.comments
+for each row execute procedure public.sync_replies_count();
+
+-- 3) Light edit/soft-delete helpers
+create or replace function public.comments_touch_edited_at()
+returns trigger language plpgsql as $$
+begin
+  -- Only set edited_at if the actual content was changed (not just metadata like likes_count, replies_count)
+  if new.content is distinct from old.content then
+    new.edited_at := now();
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists trg_comments_touch_edited on public.comments;
+create trigger trg_comments_touch_edited
+before update on public.comments
+for each row execute procedure public.comments_touch_edited_at();
+
+-- Keep your existing features.comments_count trigger as-is (already present).
+
+-- 4) RLS for reactions + updates on comments
+alter table public.comment_reactions enable row level security;
+
+drop policy if exists comment_reactions_select on public.comment_reactions;
+create policy comment_reactions_select on public.comment_reactions
+  for select using (true);
+
+drop policy if exists comment_reactions_insert on public.comment_reactions;
+create policy comment_reactions_insert on public.comment_reactions
+  for insert with check (current_setting('app.authorized', true) = 'true');
+
+drop policy if exists comment_reactions_delete_owner on public.comment_reactions;
+create policy comment_reactions_delete_owner on public.comment_reactions
+  for delete using (
+    current_setting('app.authorized', true) = 'true'
+    and (user_id::text = current_setting('app.user_id', true) or current_setting('app.admin', true) = 'true')
+  );
+
+-- Allow updates (for soft-delete / future edit) to owner or admin
+drop policy if exists comments_update_owner_or_admin on public.comments;
+create policy comments_update_owner_or_admin on public.comments
+  for update using (
+    current_setting('app.authorized', true) = 'true'
+    and (user_id::text = current_setting('app.user_id', true) or current_setting('app.admin', true) = 'true')
+  )
+  with check (true);
+
+-- 5) RPCs
+-- (A) add_comment now accepts optional parent (1-level replies)
+drop function if exists public.add_comment(text,text,text,uuid,text);
+create or replace function public.add_comment(
+  p_email      text,
+  p_name       text,
+  p_image_url  text,
+  p_feature_id uuid,
+  p_content    text,
+  p_parent_comment_id uuid default null
+) returns public.comments
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user uuid;
+  v_row  public.comments;
+  v_parent_feature uuid;
+  v_parent_parent uuid;
+begin
+  if coalesce(p_content,'') = '' then
+    raise exception 'content required';
+  end if;
+
+  if not exists (select 1 from public.features where id = p_feature_id) then
+    raise exception 'feature not found';
+  end if;
+
+  -- Ensure user context
+  v_user := public.ensure_user(p_email, p_name, p_image_url);
+  perform public.app_activate(v_user, false);
+
+  -- Replies: enforce same feature & only one level deep
+  if p_parent_comment_id is not null then
+    select feature_id, parent_id into v_parent_feature, v_parent_parent
+    from public.comments where id = p_parent_comment_id;
+
+    if v_parent_feature is null then
+      raise exception 'parent comment not found';
+    end if;
+    if v_parent_feature <> p_feature_id then
+      raise exception 'parent comment belongs to a different feature';
+    end if;
+    if v_parent_parent is not null then
+      raise exception 'only one level of replies is allowed';
+    end if;
+  end if;
+
+  insert into public.comments (user_id, feature_id, content, parent_id)
+  values (v_user, p_feature_id, p_content, p_parent_comment_id)
+  returning * into v_row;
+
+  return v_row;
+end;
+$$;
+
+-- (B) toggle_comment_like
+create or replace function public.toggle_comment_like(
+  p_email      text,
+  p_name       text,
+  p_image_url  text,
+  p_comment_id uuid
+) returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user uuid;
+  v_exists boolean;
+  v_feature uuid;
+begin
+  -- Resolve user and authorize
+  v_user := public.ensure_user(p_email, p_name, p_image_url);
+  perform public.app_activate(v_user, false);
+
+  -- Validate comment
+  if not exists (select 1 from public.comments where id = p_comment_id and is_deleted = false) then
+    raise exception 'comment not found';
+  end if;
+
+  select true into v_exists
+  from public.comment_reactions
+  where comment_id = p_comment_id and user_id = v_user and reaction = 'like';
+
+  if v_exists then
+    delete from public.comment_reactions
+    where comment_id = p_comment_id and user_id = v_user and reaction = 'like';
+    return 'removed';
+  else
+    insert into public.comment_reactions (comment_id, user_id, reaction)
+    values (p_comment_id, v_user, 'like');
+    return 'added';
+  end if;
+end;
+$$;
+
+-- (C) Soft delete by owner
+create or replace function public.soft_delete_comment_by_owner(
+  p_email      text,
+  p_comment_id uuid
+) returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_user uuid; v_cnt int;
+begin
+  select id into v_user from public.users where email = lower(trim(p_email));
+  if v_user is null then raise exception 'user not found'; end if;
+
+  perform public.app_activate(v_user, false);
+
+  update public.comments
+     set is_deleted = true, content = '', deleted_at = now()
+   where id = p_comment_id and user_id = v_user and is_deleted = false;
+
+  get diagnostics v_cnt = row_count;
+  return v_cnt > 0;
+end;
+$$;
+
+-- (D) Admin soft delete
+create or replace function public.admin_soft_delete_comment(
+  p_admin_email text,
+  p_password    text,
+  p_comment_id  uuid
+) returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_admin uuid; v_cnt int;
+begin
+  v_admin := public.verify_admin_return_id(p_admin_email, p_password);
+  perform public.app_activate(v_admin, true);
+
+  update public.comments
+     set is_deleted = true, content = '', deleted_at = now()
+   where id = p_comment_id and is_deleted = false;
+
+  get diagnostics v_cnt = row_count;
+  return v_cnt > 0;
+end;
+$$;
+
+-- 6) Public view with aggregates for the UI
+drop view if exists public.comments_public;
+create view public.comments_public with (security_invoker = on) as
+select
+  c.id,
+  c.feature_id,
+  c.parent_id,
+  case when c.is_deleted then null else c.content end as content,
+  c.is_deleted,
+  c.likes_count,
+  c.replies_count,
+  c.created_at,
+  c.edited_at,
+  u.name       as author_name,
+  u.email      as author_email,
+  u.image_url  as author_image_url
+from public.comments c
+join public.users u on u.id = c.user_id;
+
+-- 6.0) Enhanced features function with user-specific vote status and pagination
+create or replace function public.get_features_with_user_votes(
+  p_email text,
+  p_search text default null,
+  p_sort text default 'trending',
+  p_filter text default 'all',
+  p_limit integer default 10,
+  p_offset integer default 0
+) returns table (
+  id uuid,
+  title text,
+  description text,
+  status text,
+  votes_count integer,
+  comments_count integer,
+  created_at timestamptz,
+  updated_at timestamptz,
+  user_id uuid,
+  author_name text,
+  author_email text,
+  author_image_url text,
+  voted_by_me boolean,
+  total_count bigint
+) language plpgsql stable as $$
+declare 
+  v_user_id uuid;
+  v_email_param text;
+  v_total_count bigint;
+  v_search_terms text[];
+  v_search_condition text;
+begin
+  -- Store the email parameter in a local variable
+  v_email_param := lower(trim(coalesce(p_email, '')));
+  
+  -- Get user ID from email
+  select u.id into v_user_id
+  from public.users u
+  where u.email = v_email_param;
+
+  -- Validate and sanitize pagination parameters
+  p_limit := greatest(1, least(coalesce(p_limit, 10), 50)); -- Between 1 and 50
+  p_offset := greatest(0, coalesce(p_offset, 0)); -- Non-negative
+
+  -- Build search condition if provided
+  v_search_condition := '';
+  if p_search is not null and trim(p_search) <> '' then
+    -- Split search terms and create ILIKE conditions
+    v_search_terms := string_to_array(trim(p_search), ' ');
+    v_search_condition := ' AND (' || 
+      array_to_string(
+        array(
+          select 'f.title ILIKE ''%' || replace(trim(term), '''', '''''') || '%'' OR ' ||
+                 'f.description ILIKE ''%' || replace(trim(term), '''', '''''') || '%'' OR ' ||
+                 'u.name ILIKE ''%' || replace(trim(term), '''', '''''') || '%'''
+          from unnest(v_search_terms) as term
+          where trim(term) <> ''
+        ),
+        ' OR '
+      ) || ')';
+  end if;
+
+  -- Get total count with filters applied
+  execute 'SELECT COUNT(*) FROM public.features f 
+           JOIN public.users u ON u.id = f.user_id 
+           JOIN public.statuses s ON s.id = f.status_id
+           WHERE 1=1 ' ||
+           case when p_filter = 'mine' and v_user_id is not null then ' AND f.user_id = $1' else '' end ||
+           case when p_filter not in ('all', 'mine') then ' AND s.slug = $2' else '' end ||
+           v_search_condition
+  into v_total_count
+  using v_user_id, case when p_filter = 'open' then 'under_review' else p_filter end;
+
+  return query execute
+    'SELECT f.id, f.title, f.description, s.slug as status, f.votes_count, f.comments_count, 
+            f.created_at, f.updated_at, f.user_id,
+            u.name as author_name, u.email as author_email, u.image_url as author_image_url,
+            CASE WHEN $3 IS NULL THEN FALSE
+                 ELSE EXISTS(
+                   SELECT 1 FROM public.votes v 
+                   WHERE v.feature_id = f.id AND v.user_id = $3
+                 )
+            END as voted_by_me,
+            $4::bigint as total_count
+     FROM public.features f
+     JOIN public.users u ON u.id = f.user_id
+     JOIN public.statuses s ON s.id = f.status_id
+     WHERE 1=1 ' ||
+     case when p_filter = 'mine' and v_user_id is not null then ' AND f.user_id = $1' else '' end ||
+     case when p_filter not in ('all', 'mine') then ' AND s.slug = $2' else '' end ||
+     v_search_condition ||
+     ' ORDER BY ' ||
+     case 
+       when p_sort = 'new' then 'f.created_at DESC, f.id DESC'
+       when p_sort = 'top' then 'f.votes_count DESC, f.created_at DESC, f.id DESC'
+       else 'f.votes_count DESC, f.created_at DESC, f.id DESC' -- trending (default)
+     end ||
+     ' LIMIT $5 OFFSET $6'
+  using v_user_id, 
+        case when p_filter = 'open' then 'under_review' else p_filter end,
+        v_user_id, 
+        v_total_count, 
+        p_limit, 
+        p_offset;
+end;
+$$;
+
+-- 6.1) Enhanced comments view with user-specific like status WITH PAGINATION
+create or replace function public.get_comments_with_user_likes(
+  p_email text,
+  p_feature_id uuid default null,
+  p_sort text default 'newest',
+  p_limit integer default 10,
+  p_offset integer default 0
+) returns table (
+  id uuid,
+  feature_id uuid,
+  parent_id uuid,
+  content text,
+  is_deleted boolean,
+  likes_count integer,
+  replies_count integer,
+  created_at timestamptz,
+  edited_at timestamptz,
+  author_name text,
+  author_email text,
+  author_image_url text,
+  user_has_liked boolean,
+  total_count bigint
+) language plpgsql stable as $$
+declare 
+  v_user_id uuid;
+  v_email_param text;
+  v_total_count bigint;
+begin
+  -- Store the email parameter in a local variable to avoid any conflicts
+  v_email_param := lower(trim(coalesce(p_email, '')));
+  
+  -- Get user ID from email (create user if doesn't exist)
+  select u.id into v_user_id
+  from public.users u
+  where u.email = v_email_param;
+
+  -- If no user found and email provided, return empty (don't create user here)
+  if v_user_id is null and v_email_param is not null and v_email_param <> '' then
+    return;
+  end if;
+
+  -- Get total count for pagination metadata
+  select count(*) into v_total_count
+  from public.comments c
+  where (p_feature_id is null or c.feature_id = p_feature_id)
+    and (c.parent_id is null); -- Only top-level comments for activity feed
+
+  -- Validate and sanitize pagination parameters
+  p_limit := greatest(1, least(coalesce(p_limit, 10), 50)); -- Between 1 and 50
+  p_offset := greatest(0, coalesce(p_offset, 0)); -- Non-negative
+
+  return query
+  select
+    c.id,
+    c.feature_id,
+    c.parent_id,
+    case when c.is_deleted then null else c.content end as content,
+    c.is_deleted,
+    c.likes_count,
+    c.replies_count,
+    c.created_at,
+    c.edited_at,
+    u.name as author_name,
+    u.email as author_email,
+    u.image_url as author_image_url,
+    case when v_user_id is null then false
+         else exists(
+           select 1 from public.comment_reactions cr
+           where cr.comment_id = c.id
+             and cr.user_id = v_user_id
+             and cr.reaction = 'like'
+         )
+    end as user_has_liked,
+    v_total_count as total_count
+  from public.comments c
+  join public.users u on u.id = c.user_id
+  where (p_feature_id is null or c.feature_id = p_feature_id)
+    and (c.parent_id is null) -- Only top-level comments for activity feed
+  order by
+    case when p_sort = 'oldest' then c.created_at end asc,
+    case when p_sort = 'oldest' then c.id end asc, -- Secondary sort for stability
+    case when p_sort <> 'oldest' then c.created_at end desc,
+    case when p_sort <> 'oldest' then c.id end desc -- Secondary sort for stability
+  limit p_limit
+  offset p_offset;
+end;
+$$;
+
+grant select on public.comments_public to anon, authenticated;
+
+-- 7) Grants for new RPCs
+grant execute on function
+  public.add_comment(text,text,text,uuid,text,uuid),
+  public.toggle_comment_like(text,text,text,uuid),
+  public.soft_delete_comment_by_owner(text,uuid),
+  public.admin_soft_delete_comment(text,text,uuid),
+  public.get_comments_with_user_likes(text,uuid,text,integer,integer),
+  public.get_features_with_user_votes(text,text,text,text,integer,integer)
+to anon, authenticated;

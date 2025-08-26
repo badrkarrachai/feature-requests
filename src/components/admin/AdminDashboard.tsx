@@ -190,7 +190,7 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
         {/* Stats Cards */}
         <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 md:gap-6 gap-4">
           {statCards.map((stat, index) => (
-            <div key={index} className="bg-card rounded-2xl md:p-6 p-4 border border-border shadow-sm hover:shadow-md transition-shadow">
+            <div key={index} className="bg-card rounded-2xl md:p-6 p-4 border border-border shadow-xs hover:shadow-sm transition-shadow">
               <div className="flex items-center justify-between mb-4">
                 <div className={`w-12 h-12 rounded-xl flex items-center justify-center bg-${stat.bgColorLight} dark:bg-${stat.bgColorDark}`}>
                   <stat.icon className={`w-6 h-6 text-${stat.textColor} dark:text-${stat.darkTextColor}`} />
@@ -224,7 +224,7 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
         </div>
 
         {/* Recent Features */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm">
+        <div className="bg-card rounded-2xl border border-border shadow-xs">
           <div className="p-4 md:p-6 border-b border-border">
             <div className="flex items-center justify-between">
               <h2 className="text-base md:text-lg font-semibold text-foreground">Recent Feature Requests</h2>
@@ -253,7 +253,7 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
               recentFeatures.slice(0, 5).map((feature) => {
                 const StatusIcon = statusConfig[feature.status]?.icon || AlertCircle;
                 return (
-                  <div key={feature.id} className="p-4 md:p-6 hover:bg-muted transition-colors">
+                  <div key={feature.id} className="p-4 md:p-6 hover:bg-muted/50 transition-colors">
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
                       <div className="flex-1">
                         <div className="flex flex-col gap-2 mb-2">

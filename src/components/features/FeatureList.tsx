@@ -9,16 +9,20 @@ export default function FeatureList({
   searchterm,
   onOpenNew,
   pendingVotes = new Set(),
+  email,
+  name,
 }: {
   items?: Feature[];
   searchterm: string;
   onOpenNew: () => void;
   onToggleVote: (id: string, currentVoted: boolean) => void;
   pendingVotes?: Set<string>;
+  email: string;
+  name: string;
 }) {
   if ((!Array.isArray(items) || items.length === 0) && searchterm && searchterm.trim() !== "") {
     return (
-      <div className="border-x border-b rounded-b-xl">
+      <div className="border border-gray-200 rounded-b-xl border-t-0">
         <div className="flex flex-col items-center justify-center py-12 px-8">
           {/* Search/Filter Icon */}
           <div className="mb-4 p-3 rounded-full bg-amber-50 border border-amber-100">
@@ -43,7 +47,7 @@ export default function FeatureList({
   }
   if (!Array.isArray(items) || items.length === 0) {
     return (
-      <div className="border-x border-b rounded-b-xl">
+      <div className="border border-gray-200 rounded-b-xl border-t-0">
         <div className="flex flex-col items-center justify-center py-16 px-8">
           {/* Icon */}
           <div className="mb-4 p-3 rounded-full bg-gray-50 border border-gray-100">
@@ -73,7 +77,7 @@ export default function FeatureList({
     );
   }
   return (
-    <div className="border-x rounded-b-xl border-b">
+    <div className="border border-gray-200 rounded-b-xl border-t-0">
       {items.map((it) => (
         <FeatureCard
           showBottomBorder={it !== items[items.length - 1]}
@@ -83,6 +87,8 @@ export default function FeatureList({
           searchTerm={searchterm}
           isSearchActive={!!(searchterm && searchterm.trim())}
           isVotePending={pendingVotes.has(it.id)}
+          email={email}
+          name={name}
         />
       ))}
     </div>

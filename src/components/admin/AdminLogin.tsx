@@ -2,6 +2,7 @@
 
 import { Eye, EyeOff, Lock, Mail, Shield } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import type React from "react";
 import { useEffect, useState } from "react";
 import { useAdminAuth } from "@/hooks/useAdminAuth";
@@ -82,24 +83,24 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
     <div className="min-h-screen bg-gradient-to-br from-background to-primary/5 flex items-center dark:bg-[#121212] justify-center p-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-primary rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+          <div className="w-16 h-16 bg-primary rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-xs">
             <Shield className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-2xl font-bold text-foreground mb-2">Admin Panel</h1>
           <p className="text-muted-foreground">Sign in to manage feature requests</p>
         </div>
 
-        <div className="bg-card rounded-2xl shadow-xl p-8 border border-border">
+        <div className="bg-card rounded-2xl shadow-sm p-8 border border-border">
           <form onSubmit={handleLogin} className="space-y-6">
             <div>
               <label className="block text-sm font-medium text-foreground mb-2">Email</label>
               <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-                <input
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground z-10" />
+                <Input
                   type="email"
                   value={loginForm.email}
                   onChange={(e) => setLoginForm((prev) => ({ ...prev, email: e.target.value }))}
-                  className="w-full pl-11 pr-4 py-3 border border-input bg-background rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent transition-all text-foreground placeholder:text-muted-foreground"
+                  className="pl-11 pr-4 py-3 h-auto border-input bg-slate-50 rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent transition-all"
                   placeholder="admin@example.com"
                   required
                 />
@@ -109,8 +110,8 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
             <div>
               <label className="block text-sm font-medium text-foreground mb-2">Password</label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-                <input
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground z-10" />
+                <Input
                   type={loginForm.showPassword ? "text" : "password"}
                   value={loginForm.password}
                   onChange={(e) =>
@@ -119,7 +120,7 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
                       password: e.target.value,
                     }))
                   }
-                  className="w-full pl-11 pr-11 py-3 border border-input bg-background rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent transition-all text-foreground placeholder:text-muted-foreground"
+                  className="pl-11 pr-11 py-3 h-auto border-input bg-slate-50 rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent transition-all"
                   placeholder="••••••••"
                   required
                 />
@@ -131,7 +132,7 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
                       showPassword: !prev.showPassword,
                     }))
                   }
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-white hover:text-foreground"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground z-10"
                 >
                   {loginForm.showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                 </button>
@@ -139,7 +140,12 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
             </div>
 
             <div className="flex items-center space-x-2">
-              <Checkbox id="rememberMe" checked={rememberMe} onCheckedChange={(checked) => setRememberMe(checked === true)} />
+              <Checkbox
+                id="rememberMe"
+                checked={rememberMe}
+                className="data-[state=checked]:bg-primary data-[state=checked]:border-primary [&>span>svg]:text-white"
+                onCheckedChange={(checked) => setRememberMe(checked === true)}
+              />
               <label htmlFor="rememberMe" className="text-sm text-foreground cursor-pointer">
                 Remember me for 30 days
               </label>
@@ -166,7 +172,7 @@ export function AdminLogin({ onLoginSuccess }: AdminLoginProps) {
             <button
               type="submit"
               disabled={isLoading}
-              className="w-full bg-primary py-3 px-4 rounded-xl font-medium hover:opacity-90 focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-all shadow-lg disabled:opacity-50 text-white"
+              className="w-full bg-primary py-3 px-4 rounded-xl font-medium hover:opacity-90 focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-all shadow-sm disabled:opacity-50 text-white"
             >
               {isLoading ? "Signing In..." : "Sign In"}
             </button>

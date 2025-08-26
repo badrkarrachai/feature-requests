@@ -2,12 +2,7 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -29,9 +24,7 @@ export default function NewFeatureModal({
 }) {
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [submittedRequests, setSubmittedRequests] = useState<Set<string>>(
-    new Set(),
-  );
+  const [submittedRequests, setSubmittedRequests] = useState<Set<string>>(new Set());
 
   async function onSubmit(data: FormData) {
     const title = String(data.get("title") || "").trim();
@@ -80,14 +73,9 @@ export default function NewFeatureModal({
 
         // Handle duplicate feature requests
         if (res.status === 409) {
-          alert(
-            "You have already requested a feature with this title. Please use a different title or check your existing requests.",
-          );
+          alert("You have already requested a feature with this title. Please use a different title or check your existing requests.");
         } else {
-          alert(
-            errorData.error ||
-              "Failed to create feature request. Please try again.",
-          );
+          alert(errorData.error || "Failed to create feature request. Please try again.");
         }
       }
     } catch (error) {
@@ -109,7 +97,7 @@ export default function NewFeatureModal({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && !submitting && onClose()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg bg-white dark:bg-[#121212]">
         <DialogHeader>
           <DialogTitle>Request a new feature</DialogTitle>
         </DialogHeader>
@@ -125,52 +113,24 @@ export default function NewFeatureModal({
               <Label htmlFor="title" className="mb-1">
                 Title
               </Label>
-              <Input
-                id="title"
-                name="title"
-                required
-                placeholder="Short, clear title"
-                className="h-11"
-              />
+              <Input id="title" name="title" required placeholder="Short, clear title" className="h-11" />
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="description" className="mb-1">
                 Description
               </Label>
-              <Textarea
-                id="description"
-                name="description"
-                required
-                placeholder="Explain what you need and why"
-                className="min-h-[100px]"
-              />
+              <Textarea id="description" name="description" required placeholder="Explain what you need and why" className="min-h-[100px]" />
             </div>
           </div>
           <p className="text-xs mt-6 text-muted-foreground">
-            Your first name{" "}
-            <span className="font-medium text-foreground capitalize">
-              {name}
-            </span>{" "}
-            will be visible to others. Your email{" "}
-            <span className="font-medium text-foreground">{email}</span> stays
-            private and is only used to track your votes and send updates.
+            Your first name <span className="font-medium text-foreground capitalize">{name}</span> will be visible to others. Your email{" "}
+            <span className="font-medium text-foreground">{email}</span> stays private and is only used to track your votes and send updates.
           </p>
           <div className="mt-5 flex items-center justify-end gap-2">
-            <Button
-              type="button"
-              size={"lg"}
-              variant="ghost"
-              onClick={onClose}
-              disabled={submitting}
-            >
+            <Button type="button" size={"lg"} variant="ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </Button>
-            <Button
-              type="submit"
-              size={"lg"}
-              className="text-white"
-              disabled={submitting}
-            >
+            <Button type="submit" size={"lg"} className="text-white" disabled={submitting}>
               {loading ? (
                 <>
                   <div className="h-4 w-4 animate-spin rounded-full border border-white border-t-transparent mr-2" />

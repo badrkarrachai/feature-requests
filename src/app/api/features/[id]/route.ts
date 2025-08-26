@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
-import { isRequesterAdmin } from "@/lib/utils/admin";
+import { isRequesterAdmin, getUserIdByEmail } from "@/lib/utils/admin";
 
 const ALLOWED = ["under_review", "planned", "in_progress", "done"] as const;
 type FeatureStatus = (typeof ALLOWED)[number];
@@ -8,6 +8,52 @@ type FeatureStatus = (typeof ALLOWED)[number];
 function toSlug(input: string): FeatureStatus | null {
   const s = input.trim().toLowerCase().replace(/\s+/g, "_");
   return (ALLOWED as readonly string[]).includes(s) ? (s as FeatureStatus) : null;
+}
+
+// GET /api/features/[id]?email=&name=
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const { id } = await ctx.params;
+  const { searchParams } = new URL(req.url);
+  const email = searchParams.get("email") || "";
+  const name = searchParams.get("name") || "";
+
+  if (!email || !name) {
+    return NextResponse.json({ error: "email and name are required" }, { status: 400 });
+  }
+
+  try {
+    // Get feature from features_public view
+    const { data: feature, error } = await supabaseAdmin.from("features_public").select("*").eq("id", id).single();
+
+    if (error) {
+      if (error.code === "PGRST116") {
+        return NextResponse.json({ error: "Feature not found" }, { status: 404 });
+      }
+      console.error("Error fetching feature:", error);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    if (!feature) {
+      return NextResponse.json({ error: "Feature not found" }, { status: 404 });
+    }
+
+    // Check if user has voted for this feature
+    let votedByMe = false;
+    const userId = await getUserIdByEmail(email);
+    if (userId) {
+      const { data: vote } = await supabaseAdmin.from("votes").select("id").eq("user_id", userId).eq("feature_id", id).single();
+      votedByMe = !!vote;
+    }
+
+    // Return feature with votedByMe field
+    return NextResponse.json({
+      ...feature,
+      votedByMe,
+    });
+  } catch (error) {
+    console.error("Error in GET /api/features/[id]:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }
 
 export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {

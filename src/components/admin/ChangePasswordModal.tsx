@@ -116,7 +116,7 @@ export function ChangePasswordModal({ isOpen, adminEmail, isDefaultAccount, onPa
 
   return (
     <Dialog open={isOpen} onOpenChange={() => {}}>
-      <DialogContent className="sm:max-w-md" showCloseButton={!isDefaultAccount}>
+      <DialogContent className="sm:max-w-md bg-white dark:bg-[#121212]" showCloseButton={!isDefaultAccount}>
         <DialogHeader className="text-center">
           <div className="w-16 h-16 bg-destructive/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Shield className="w-8 h-8 text-destructive" />

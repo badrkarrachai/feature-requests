@@ -12,7 +12,7 @@
 :root {
   color-scheme: light;
 
-  --bg: #ffffff;
+  --bg: #f1f1f1;
   --card: oklch(1 0 0);
   --muted: oklch(0.97 0 0);
   --border: oklch(0.922 0 0);
@@ -22,7 +22,7 @@
   --ring: oklch(0.607 0.112 141.361); /* match primary for focus rings */
 
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
+  --background: oklch(0.98 0 0);
   --foreground: oklch(0.145 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
@@ -141,9 +141,7 @@
   --color-sidebar-ring: var(--sidebar-ring);
 
   /* Inter as global sans */
-  --font-sans:
-    Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji",
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji",
     "Segoe UI Symbol", sans-serif;
 }
 
@@ -155,10 +153,32 @@
   html,
   body {
     height: 100%;
-    background: var(--bg);
   }
   body {
     @apply bg-background text-foreground font-sans antialiased;
+  }
+}
+
+/* ---------- Text selection ---------- */
+::selection {
+  background-color: rgb(59 130 246 / 0.5); /* Neutral blue selection */
+  color: inherit;
+}
+
+::-moz-selection {
+  background-color: rgb(59 130 246 / 0.5); /* Firefox support */
+  color: inherit;
+}
+
+/* ---------- Custom animations ---------- */
+@keyframes slideInRight {
+  from {
+    transform: translateX(-10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
   }
 }
 
@@ -172,9 +192,7 @@
 }
 
 .shadow-soft {
-  box-shadow:
-    0 1px 2px rgba(16, 24, 40, 0.05),
-    0 1px 3px rgba(16, 24, 40, 0.1);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.1);
 }
 
 .btn {

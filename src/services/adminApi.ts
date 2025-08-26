@@ -169,6 +169,36 @@ class AdminApi {
     }
   }
 
+  async removeAdmin(adminId: string): Promise<{ success: boolean; message: string; updatedUser?: AdminUser }> {
+    try {
+      const response = await fetch(`/api/admins/${adminId}`, {
+        method: "PATCH",
+        ...this.getRequestOptions(),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        return {
+          success: false,
+          message: errorData.error || "Failed to remove admin",
+        };
+      }
+
+      const data = await response.json();
+      return {
+        success: true,
+        message: data.message,
+        updatedUser: data.updatedUser,
+      };
+    } catch (error) {
+      console.error("Error removing admin:", error);
+      return {
+        success: false,
+        message: "Failed to remove admin",
+      };
+    }
+  }
+
   // Features Management
   async getFeatures(params?: {
     email?: string;

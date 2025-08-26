@@ -1,7 +1,6 @@
 // API: GET list (supports q, sort OR filter, pagination) / POST create
 import { type NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
-import { getUserIdByEmail } from "@/lib/utils/admin";
 
 export const runtime = "nodejs";
 
@@ -17,85 +16,41 @@ export async function GET(req: NextRequest) {
   const limit = Math.min(Math.max(parseInt(searchParams.get("limit") || "10", 10), 1), 50);
   const page = Math.max(parseInt(searchParams.get("page") || "1", 10), 1);
   const from = (page - 1) * limit;
-  const to = from + limit - 1;
 
-  // Use the features_public view for better performance and author info
-  let builder = supabaseAdmin.from("features_public").select("*", { count: "exact" });
+  // Use enhanced RPC function with database-level pagination and filtering
+  try {
+    const { data: rpcFeatures, error } = await supabaseAdmin.rpc("get_features_with_user_votes", {
+      p_email: email.toLowerCase().trim(),
+      p_search: q || null,
+      p_sort: sort || "trending",
+      p_filter: filter,
+      p_limit: limit,
+      p_offset: from,
+    });
 
-  if (q) {
-    // Split query into words and create search conditions for each word
-    const searchTerms = q.split(/\s+/).filter((term) => term.length > 0);
-    if (searchTerms.length > 0) {
-      const searchConditions = searchTerms
-        .map((term) => {
-          const searchTerm = `%${term}%`;
-          return `title.ilike.${searchTerm},description.ilike.${searchTerm},author_name.ilike.${searchTerm}`;
-        })
-        .join(",");
-      builder = builder.or(searchConditions);
+    if (error) {
+      console.error("Error with enhanced features RPC function:", error);
+      return NextResponse.json({ error: "Failed to load features" }, { status: 500 });
     }
+
+    const results = rpcFeatures || [];
+
+    // Extract total count from first result (all rows have same total_count)
+    const total = results.length > 0 ? results[0].total_count : 0;
+
+    // Remove total_count from each feature object and rename voted_by_me to votedByMe
+    const items = results.map(({ total_count, voted_by_me, ...feature }: { total_count: number; voted_by_me: boolean; [key: string]: unknown }) => ({
+      ...feature,
+      votedByMe: voted_by_me,
+    }));
+
+    const hasMore = from + items.length < total;
+
+    return NextResponse.json({ items, page, total, pageSize: limit, hasMore });
+  } catch (error) {
+    console.error("Error in features API:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
-
-  // filter first
-  if (filter === "mine") {
-    if (!email)
-      return NextResponse.json({
-        items: [],
-        page,
-        total: 0,
-        pageSize: limit,
-        hasMore: false,
-      });
-    const userId = await getUserIdByEmail(email);
-    if (!userId)
-      return NextResponse.json({
-        items: [],
-        page,
-        total: 0,
-        pageSize: limit,
-        hasMore: false,
-      });
-    builder = builder.eq("user_id", userId);
-  } else if (filter !== "all") {
-    // Map "open" to "under_review" for backward compatibility with frontend
-    const dbFilter = filter === "open" ? "under_review" : filter;
-    builder = builder.eq("status", dbFilter);
-  }
-
-  // sort next
-  if (sort === "new") {
-    builder = builder.order("created_at", { ascending: false }).order("id", { ascending: false });
-  } else if (sort === "top" || sort === "trending") {
-    builder = builder.order("votes_count", { ascending: false }).order("created_at", { ascending: false }).order("id", { ascending: false });
-  } else {
-    // default (filter-only) recency
-    builder = builder.order("created_at", { ascending: false }).order("id", { ascending: false });
-  }
-
-  const { data, error, count } = await builder.range(from, to);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-  // mark voted only for returned page
-  const votedMap: Record<string, boolean> = {};
-  if (email && data && data.length) {
-    const userId = await getUserIdByEmail(email);
-    if (userId) {
-      const ids = data.map((f: { id: string }) => f.id);
-      const { data: votes } = await supabaseAdmin.from("votes").select("feature_id").eq("user_id", userId).in("feature_id", ids);
-      (votes || []).forEach((v: { feature_id: string }) => {
-        votedMap[v.feature_id] = true;
-      });
-    }
-  }
-
-  const items = (data || []).map((f: { id: string; [key: string]: unknown }) => ({
-    ...f,
-    votedByMe: !!votedMap[f.id],
-  }));
-  const total = count ?? 0;
-  const hasMore = from + items.length < total;
-
-  return NextResponse.json({ items, page, total, pageSize: limit, hasMore });
 }
 
 // POST /api/features
