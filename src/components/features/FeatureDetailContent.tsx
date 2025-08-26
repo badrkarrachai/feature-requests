@@ -25,6 +25,9 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
   const [error, setError] = useState<string | null>(null);
   const [isVotePending, setIsVotePending] = useState(false);
   const [isCommentFocused, setIsCommentFocused] = useState(false);
+  const [initialComments, setInitialComments] = useState<any[] | null>(null);
+  const [commentsMetadata, setCommentsMetadata] = useState<{ total: number; hasMore: boolean } | null>(null);
+  const [addCommentToFeed, setAddCommentToFeed] = useState<((comment: any) => void) | null>(null);
 
   // Handle escape key to close comment form
   useEffect(() => {
@@ -38,7 +41,7 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isCommentFocused]);
 
-  // Load feature details
+  // Load feature details with initial comments
   useEffect(() => {
     if (!email || !name || !featureId) return;
 
@@ -47,9 +50,12 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
       setError(null);
 
       try {
-        const res = await fetch(`/api/features/${featureId}?email=${encodeURIComponent(email)}&name=${encodeURIComponent(name)}`, {
-          cache: "no-store",
-        });
+        const res = await fetch(
+          `/api/features/${featureId}?email=${encodeURIComponent(email)}&name=${encodeURIComponent(name)}&includeComments=true`,
+          {
+            cache: "no-store",
+          }
+        );
 
         if (!res.ok) {
           if (res.status === 404) {
@@ -60,6 +66,19 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
 
         const data = await res.json();
         setFeature(data);
+
+        // Store initial comments data to pass directly to ActivityFeed
+        if (data.comments) {
+          setInitialComments(data.comments);
+          setCommentsMetadata({
+            total: data.commentsTotal,
+            hasMore: data.commentsHasMore,
+          });
+        } else {
+          // No initial comments were loaded
+          setInitialComments([]);
+          setCommentsMetadata({ total: 0, hasMore: false });
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "An unexpected error occurred");
       } finally {
@@ -145,7 +164,11 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
     router.push(`/features?${currentParams.toString()}`);
   };
 
-  const getUserAvatar = (authorName: string) => {
+  const getUserAvatar = (authorName: string, imageUrl?: string) => {
+    if (imageUrl) {
+      return <img src={imageUrl} alt={authorName} className="w-8 h-8 rounded-full object-cover flex-shrink-0" />;
+    }
+
     const initial = (authorName || "U").charAt(0).toUpperCase();
     const colors = ["bg-red-500", "bg-blue-500", "bg-green-500", "bg-yellow-500", "bg-purple-500", "bg-pink-500", "bg-indigo-500", "bg-orange-500"];
     const colorIndex = authorName.length % colors.length;
@@ -277,7 +300,7 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
 
                 {/* Author info */}
                 <div className="flex items-center gap-3 mb-4">
-                  {getUserAvatar(feature.author_name || feature.name || "Unknown User")}
+                  {getUserAvatar(feature.author_name || feature.name || "Unknown User", feature.author_image_url)}
                   <div>
                     <div className="text-sm font-semibold text-gray-900 capitalize">{feature.author_name || feature.name || "Unknown User"}</div>
                     <div className="text-xs text-gray-500">
@@ -301,9 +324,11 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
                     featureId={featureId}
                     email={email}
                     name={name}
-                    onCommentAdded={() => {
-                      // Trigger activity feed refresh
-                      window.dispatchEvent(new CustomEvent("refreshActivityFeed"));
+                    onCommentAdded={(newComment) => {
+                      // Add comment locally to the activity feed
+                      if (addCommentToFeed) {
+                        addCommentToFeed(newComment);
+                      }
                     }}
                     placeholder="Leave a comment..."
                     onFocus={() => setIsCommentFocused(true)}
@@ -321,8 +346,17 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
           </CardContent>
         </Card>
 
-        {/* Activity Feed */}
-        <ActivityFeed featureId={featureId} email={email} name={name} />
+        {/* Activity Feed - Only render when we know about initial comments */}
+        {initialComments !== null && commentsMetadata !== null && (
+          <ActivityFeed
+            featureId={featureId}
+            email={email}
+            name={name}
+            initialComments={initialComments}
+            initialCommentsMetadata={commentsMetadata}
+            onAddComment={(addCommentFn) => setAddCommentToFeed(() => addCommentFn)}
+          />
+        )}
       </div>
     </div>
   );

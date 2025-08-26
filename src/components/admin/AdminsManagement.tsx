@@ -250,14 +250,20 @@ export function AdminsManagement() {
             admins.map((admin) => (
               <div key={admin.id} className="bg-card rounded-2xl p-5 border border-border shadow-xs hover:shadow-sm transition-shadow">
                 <div className="flex items-center gap-4">
-                  <div className="w-14 h-14 bg-primary rounded-xl flex items-center justify-center">
-                    <span className="text-white dark:text-primary-foreground font-semibold text-xl">
-                      {admin.name
-                        .split(" ")
-                        .map((n) => n[0])
-                        .join("")
-                        .toUpperCase()}
-                    </span>
+                  <div className="w-14 h-14 rounded-xl overflow-hidden flex-shrink-0">
+                    {admin.image_url ? (
+                      <img src={admin.image_url} alt={admin.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full bg-primary rounded-xl flex items-center justify-center">
+                        <span className="text-white dark:text-primary-foreground font-semibold text-xl">
+                          {admin.name
+                            .split(" ")
+                            .map((n) => n[0])
+                            .join("")
+                            .toUpperCase()}
+                        </span>
+                      </div>
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <h3 className="font-semibold text-foreground truncate">{admin.name.charAt(0).toUpperCase() + admin.name.slice(1)}</h3>

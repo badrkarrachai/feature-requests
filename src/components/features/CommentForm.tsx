@@ -9,12 +9,13 @@ interface CommentFormProps {
   featureId: string;
   email: string;
   name: string;
-  onCommentAdded?: () => void;
+  onCommentAdded?: (newComment: any) => void; // Pass the new comment data
   parentCommentId?: string | null; // For replies
   placeholder?: string;
   onFocus?: () => void;
   onBlur?: () => void;
   isFocused?: boolean;
+  isReply?: boolean; // Whether this is a reply or a new comment
 }
 
 export default function CommentForm({
@@ -27,6 +28,7 @@ export default function CommentForm({
   onFocus,
   onBlur,
   isFocused = false,
+  isReply = false,
 }: CommentFormProps) {
   const [comment, setComment] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -62,9 +64,13 @@ export default function CommentForm({
         throw new Error(errorData.error || "Failed to add comment");
       }
 
-      // Success - just clear the form and notify parent
+      const responseData = await res.json();
+
+      // Success - clear the form and pass the new comment data to parent
       setComment("");
-      onCommentAdded?.();
+      if (onCommentAdded && responseData.comment) {
+        onCommentAdded(responseData.comment);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add comment");
     } finally {
@@ -107,7 +113,7 @@ export default function CommentForm({
             ) : (
               <SendHorizonal className="w-3 h-3" />
             )}
-            {isSubmitting ? "Adding..." : "Comment"}
+            {isSubmitting ? (isReply ? "Replying..." : "Adding...") : isReply ? "Reply" : "Comment"}
           </Button>
         </div>
       )}

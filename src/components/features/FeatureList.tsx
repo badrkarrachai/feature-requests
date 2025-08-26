@@ -78,9 +78,10 @@ export default function FeatureList({
   }
   return (
     <div className="border border-gray-200 rounded-b-xl border-t-0">
-      {items.map((it) => (
+      {items.map((it, index) => (
         <FeatureCard
           showBottomBorder={it !== items[items.length - 1]}
+          isFirstCard={index === 0}
           key={it.id}
           item={it}
           onToggleVote={onToggleVote}

@@ -85,14 +85,20 @@ function AdminContent() {
 
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center">
-                  <span className="text-white dark:text-primary-foreground font-semibold text-sm">
-                    {currentAdmin?.name
-                      ?.split(" ")
-                      .map((n: string) => n[0])
-                      .join("")
-                      .toUpperCase() || "A"}
-                  </span>
+                <div className="w-8 h-8 rounded-full overflow-hidden flex-shrink-0">
+                  {currentAdmin?.image_url ? (
+                    <img src={currentAdmin.image_url} alt={currentAdmin.name || "Admin"} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-primary rounded-full flex items-center justify-center">
+                      <span className="text-white dark:text-primary-foreground font-semibold text-sm">
+                        {currentAdmin?.name
+                          ?.split(" ")
+                          .map((n: string) => n[0])
+                          .join("")
+                          .toUpperCase() || "A"}
+                      </span>
+                    </div>
+                  )}
                 </div>
                 <div className="hidden md:block">
                   <p className="text-sm font-medium text-foreground">{currentAdmin?.name.charAt(0).toUpperCase() + currentAdmin?.name.slice(1)}</p>

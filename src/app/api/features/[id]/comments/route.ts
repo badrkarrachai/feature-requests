@@ -1,6 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
 
+// The POST function for adding comments is already defined below
+
 export const runtime = "nodejs";
 
 // GET /api/features/[id]/comments?email=&name=&sort=newest|oldest&limit=10&page=1
@@ -29,31 +31,37 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       return NextResponse.json({ error: "Feature not found" }, { status: 404 });
     }
 
-    // Use enhanced RPC function with database-level pagination
+    // Use new RPC function with nested replies structure
     let comments = [];
     let total = 0;
 
     try {
-      const { data: rpcComments, error } = await supabaseAdmin.rpc("get_comments_with_user_likes", {
+      const { data: rpcResult, error } = await supabaseAdmin.rpc("get_comments_with_replies", {
         p_email: email.toLowerCase().trim(),
         p_feature_id: id,
         p_sort: sort,
         p_limit: limit,
         p_offset: from,
+        p_replies_limit: 3, // Load first 3 replies initially
       });
 
       if (error) {
-        console.error("Error with enhanced RPC function:", error);
+        console.error("Error with get_comments_with_replies RPC function:", error);
         throw error;
       }
 
-      const results = rpcComments || [];
+      // The RPC returns a JSON array of comments with nested replies
+      comments = Array.isArray(rpcResult) ? rpcResult : [];
 
-      // Extract total count from first result (all rows have same total_count)
-      total = results.length > 0 ? results[0].total_count : 0;
+      // Get total count of top-level comments for pagination
+      const { count: totalCount } = await supabaseAdmin
+        .from("comments")
+        .select("id", { count: "exact", head: true })
+        .eq("feature_id", id)
+        .is("parent_id", null)
+        .eq("is_deleted", false);
 
-      // Remove total_count from each comment object since it's metadata
-      comments = results.map(({ total_count, ...comment }: { total_count: number; [key: string]: unknown }) => comment);
+      total = totalCount || 0;
     } catch (rpcError) {
       console.error("RPC function failed:", rpcError);
       return NextResponse.json({ error: "Failed to load comments" }, { status: 500 });

@@ -56,4 +56,8 @@ export type Activity = {
   replies_count?: number;
   edited_at?: string | null;
   user_has_liked?: boolean;
+  parent_comment_id?: string | null; // for replies
+  // Reply pagination fields (for main comments only)
+  replies_has_more?: boolean;
+  replies_total_count?: number;
 };

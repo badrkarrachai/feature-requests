@@ -49,6 +49,7 @@ const highlightSearchText = (text: string, query: string): React.ReactNode => {
 export default function FeatureCard({
   item,
   showBottomBorder,
+  isFirstCard = false,
   onToggleVote,
   searchTerm = "",
   isSearchActive = false,
@@ -58,6 +59,7 @@ export default function FeatureCard({
 }: {
   item: Feature;
   showBottomBorder: boolean;
+  isFirstCard?: boolean;
   onToggleVote: (id: string, currentVoted: boolean) => void;
   searchTerm?: string;
   isSearchActive?: boolean;
@@ -100,8 +102,9 @@ export default function FeatureCard({
   return (
     <Card
       className={`
-        border-x-0 border-t-0 shadow-none cursor-pointer hover:bg-gray-50/50 transition-colors
-        ${showBottomBorder ? "border-b border-b-gray-200 rounded-none" : "border-b-0 rounded-b-xl"}
+        border-x-0 shadow-none cursor-pointer hover:bg-gray-50/50 transition-colors
+        ${isFirstCard ? "border-t border-t-gray-200" : "border-t-0"}
+        ${showBottomBorder ? "border-b border-b-gray-200 rounded-none" : "border-b-0 rounded-t-none rounded-b-xl"}
       `}
       onClick={handleCardClick}
     >

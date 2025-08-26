@@ -2059,7 +2059,7 @@ begin
     return;
   end if;
 
-  -- Get total count for pagination metadata
+  -- Get total count for pagination metadata (only top-level comments)
   select count(*) into v_total_count
   from public.comments c
   where (p_feature_id is null or c.feature_id = p_feature_id)
@@ -2106,7 +2106,419 @@ begin
 end;
 $$;
 
+-- (D) get_comments_with_replies - Get comments with nested replies for activity feed
+create or replace function public.get_comments_with_replies(
+  p_email text,
+  p_feature_id uuid,
+  p_sort text default 'newest',
+  p_limit integer default 10,
+  p_offset integer default 0,
+  p_replies_limit integer default 5
+) returns json language plpgsql stable as $$
+declare
+  v_user_id uuid;
+  v_email_param text;
+  v_result json;
+begin
+  -- Store the email parameter in a local variable to avoid any conflicts
+  v_email_param := lower(trim(coalesce(p_email, '')));
+
+  -- Get user ID from email (create user if doesn't exist)
+  select u.id into v_user_id
+  from public.users u
+  where u.email = v_email_param;
+
+  -- If no user found and email provided, return empty (don't create user here)
+  if v_user_id is null and v_email_param is not null and v_email_param <> '' then
+    return '[]'::json;
+  end if;
+
+  -- Validate and sanitize pagination parameters
+  p_limit := greatest(1, least(coalesce(p_limit, 10), 50)); -- Between 1 and 50
+  p_offset := greatest(0, coalesce(p_offset, 0)); -- Non-negative
+
+  -- Get top-level comments with their replies in a nested JSON structure
+  -- First, get the paginated comments, then build JSON
+  select json_agg(
+    json_build_object(
+      'id', paginated_comments.id,
+      'feature_id', paginated_comments.feature_id,
+      'parent_id', paginated_comments.parent_id,
+      'content', paginated_comments.content,
+      'is_deleted', paginated_comments.is_deleted,
+      'likes_count', paginated_comments.likes_count,
+      'replies_count', paginated_comments.replies_count,
+      'created_at', paginated_comments.created_at,
+      'edited_at', paginated_comments.edited_at,
+      'author_name', paginated_comments.author_name,
+      'author_email', paginated_comments.author_email,
+      'author_image_url', paginated_comments.author_image_url,
+      'user_has_liked', paginated_comments.user_has_liked,
+      'replies', coalesce((
+        select json_build_object(
+          'items', json_agg(
+            json_build_object(
+              'id', r.id,
+              'feature_id', r.feature_id,
+              'parent_id', r.parent_id,
+              'content', case when r.is_deleted then null else r.content end,
+              'is_deleted', r.is_deleted,
+              'likes_count', r.likes_count,
+              'replies_count', r.replies_count,
+              'created_at', r.created_at,
+              'edited_at', r.edited_at,
+              'author_name', r.name,
+              'author_email', r.email,
+              'author_image_url', r.image_url,
+              'user_has_liked', case when v_user_id is null then false
+                                   else exists(
+                                     select 1 from public.comment_reactions cr
+                                     where cr.comment_id = r.id
+                                       and cr.user_id = v_user_id
+                                       and cr.reaction = 'like'
+                                   )
+                                   end
+            )
+            order by r.created_at asc
+          ),
+          'has_more', (select count(*) > p_replies_limit from public.comments where parent_id = paginated_comments.id and is_deleted = false),
+          'total_count', (select count(*) from public.comments where parent_id = paginated_comments.id and is_deleted = false)
+        )
+        from (
+          select r.id, r.feature_id, r.parent_id, r.content, r.is_deleted, r.likes_count, 
+                 r.replies_count, r.created_at, r.edited_at, r.user_id,
+                 ru.name, ru.email, ru.image_url
+          from public.comments r
+          join public.users ru on ru.id = r.user_id
+          where r.parent_id = paginated_comments.id and r.is_deleted = false
+          order by r.created_at asc
+          limit p_replies_limit
+        ) r
+      ), json_build_object('items', '[]'::json, 'has_more', false, 'total_count', 0))
+    )
+  ) into v_result
+  from (
+    select
+      c.id,
+      c.feature_id,
+      c.parent_id,
+      case when c.is_deleted then null else c.content end as content,
+      c.is_deleted,
+      c.likes_count,
+      c.replies_count,
+      c.created_at,
+      c.edited_at,
+      u.name as author_name,
+      u.email as author_email,
+      u.image_url as author_image_url,
+      case when v_user_id is null then false
+           else exists(
+             select 1 from public.comment_reactions cr
+             where cr.comment_id = c.id
+               and cr.user_id = v_user_id
+               and cr.reaction = 'like'
+           )
+      end as user_has_liked
+    from public.comments c
+    join public.users u on u.id = c.user_id
+    where c.feature_id = p_feature_id
+      and c.parent_id is null -- Only top-level comments
+      and c.is_deleted = false
+    order by
+      case when p_sort = 'oldest' then c.created_at end asc,
+      case when p_sort = 'newest' then c.created_at end desc,
+      c.id asc -- Secondary sort for stability
+    limit p_limit
+    offset p_offset
+  ) paginated_comments;
+
+  return coalesce(v_result, '[]'::json);
+end;
+$$;
+
+-- (E) get_comment_replies - Get paginated replies for a specific comment
+create or replace function public.get_comment_replies(
+  p_email text,
+  p_comment_id uuid,
+  p_limit integer default 10,
+  p_offset integer default 0
+) returns json language plpgsql stable as $$
+declare
+  v_user_id uuid;
+  v_email_param text;
+  v_parent_feature uuid;
+  v_result json;
+begin
+  -- Store the email parameter in a local variable to avoid any conflicts
+  v_email_param := lower(trim(coalesce(p_email, '')));
+
+  -- Get user ID from email (create user if doesn't exist)
+  select u.id into v_user_id
+  from public.users u
+  where u.email = v_email_param;
+
+  -- Validate comment exists and get its feature
+  select c.feature_id into v_parent_feature
+  from public.comments c
+  where c.id = p_comment_id and c.is_deleted = false;
+
+  if v_parent_feature is null then
+    return json_build_object('error', 'Comment not found', 'replies', '[]'::json, 'has_more', false);
+  end if;
+
+  -- Validate and sanitize pagination parameters
+  p_limit := greatest(1, least(coalesce(p_limit, 10), 50)); -- Between 1 and 50
+  p_offset := greatest(0, coalesce(p_offset, 0)); -- Non-negative
+
+  -- Get replies with pagination
+  select json_build_object(
+    'replies', coalesce(json_agg(
+      json_build_object(
+        'id', r.id,
+        'feature_id', r.feature_id,
+        'parent_id', r.parent_id,
+        'content', case when r.is_deleted then null else r.content end,
+        'is_deleted', r.is_deleted,
+        'likes_count', r.likes_count,
+        'replies_count', r.replies_count,
+        'created_at', r.created_at,
+        'edited_at', r.edited_at,
+        'author_name', r.name,
+        'author_email', r.email,
+        'author_image_url', r.image_url,
+        'user_has_liked', case when v_user_id is null then false
+                             else exists(
+                               select 1 from public.comment_reactions cr
+                               where cr.comment_id = r.id
+                                 and cr.user_id = v_user_id
+                                 and cr.reaction = 'like'
+                             )
+                             end
+      )
+      order by r.created_at asc
+    ), '[]'::json),
+    'has_more', (select count(*) > (p_offset + p_limit) from public.comments where parent_id = p_comment_id and is_deleted = false),
+    'total_count', (select count(*) from public.comments where parent_id = p_comment_id and is_deleted = false)
+  ) into v_result
+  from (
+    select r.id, r.feature_id, r.parent_id, r.content, r.is_deleted, r.likes_count, 
+           r.replies_count, r.created_at, r.edited_at, r.user_id,
+           ru.name, ru.email, ru.image_url
+    from public.comments r
+    join public.users ru on ru.id = r.user_id
+    where r.parent_id = p_comment_id and r.is_deleted = false
+    order by r.created_at asc
+    limit p_limit
+    offset p_offset
+  ) r;
+
+  return coalesce(v_result, json_build_object('replies', '[]'::json, 'has_more', false, 'total_count', 0));
+end;
+$$;
+
 grant select on public.comments_public to anon, authenticated;
+
+-- =========================================================
+-- RPC: Get feature with initial comments (optimized single query)
+-- =========================================================
+create or replace function public.get_feature_with_comments(
+  p_email text,
+  p_feature_id uuid,
+  p_comments_limit integer default 10
+) returns table (
+  -- Feature fields
+  feature_id uuid,
+  feature_title text,
+  feature_description text,
+  feature_status text,
+  feature_status_label text,
+  feature_votes_count integer,
+  feature_comments_count integer,
+  feature_created_at timestamptz,
+  feature_updated_at timestamptz,
+  feature_author_name text,
+  feature_author_email text,
+  feature_author_image_url text,
+  feature_user_voted boolean,
+  -- Comments fields (null if no comments)
+  comment_id uuid,
+  comment_content text,
+  comment_is_deleted boolean,
+  comment_likes_count integer,
+  comment_replies_count integer,
+  comment_created_at timestamptz,
+  comment_edited_at timestamptz,
+  comment_author_name text,
+  comment_author_email text,
+  comment_author_image_url text,
+  comment_user_has_liked boolean,
+  -- Pagination metadata
+  comments_total_count bigint,
+  comments_has_more boolean
+) language plpgsql stable as $$
+declare 
+  v_user_id uuid;
+  v_email_param text;
+  v_total_comments_count bigint;
+begin
+  -- Store the email parameter in a local variable
+  v_email_param := lower(trim(coalesce(p_email, '')));
+  
+  -- Get user ID from email
+  select u.id into v_user_id
+  from public.users u
+  where u.email = v_email_param;
+
+  -- If no user found and email provided, return empty
+  if v_user_id is null and v_email_param is not null and v_email_param <> '' then
+    return;
+  end if;
+
+  -- Get total comments count for pagination metadata
+  select count(*) into v_total_comments_count
+  from public.comments c
+  where c.feature_id = p_feature_id
+    and c.parent_id is null; -- Only top-level comments
+    
+  -- Validate pagination parameters
+  p_comments_limit := greatest(1, least(coalesce(p_comments_limit, 10), 50));
+
+  return query
+  with feature_data as (
+    select 
+      f.id,
+      f.title,
+      f.description,
+      f.status,
+      f.status_label,
+      f.votes_count,
+      f.comments_count,
+      f.created_at,
+      f.updated_at,
+      f.author_name,
+      f.author_email,
+      f.author_image_url,
+      case when v.id is not null then true else false end as user_voted
+    from public.features_public f
+    left join public.votes v on v.feature_id = f.id and v.user_id = v_user_id
+    where f.id = p_feature_id
+  ),
+  comments_data as (
+    select
+      (value->>'id')::uuid as id,
+      value->>'content' as content,
+      (value->>'is_deleted')::boolean as is_deleted,
+      (value->>'likes_count')::integer as likes_count,
+      (value->>'replies_count')::integer as replies_count,
+      (value->>'created_at')::timestamptz as created_at,
+      (value->>'edited_at')::timestamptz as edited_at,
+      value->>'author_name' as author_name,
+      value->>'author_email' as author_email,
+      value->>'author_image_url' as author_image_url,
+      (value->>'user_has_liked')::boolean as user_has_liked,
+      row_number() over (order by (value->>'created_at')::timestamptz desc) as rn
+    from json_array_elements((
+      select json_agg(
+        json_build_object(
+          'id', c.id,
+          'content', case when c.is_deleted then null else c.content end,
+          'is_deleted', c.is_deleted,
+          'likes_count', c.likes_count,
+          'replies_count', c.replies_count,
+          'created_at', c.created_at,
+          'edited_at', c.edited_at,
+          'author_name', u.name,
+          'author_email', u.email,
+          'author_image_url', u.image_url,
+          'user_has_liked', case when v_user_id is null then false
+                               else exists(
+                                 select 1 from public.comment_reactions cr
+                                 where cr.comment_id = c.id
+                                   and cr.user_id = v_user_id
+                                   and cr.reaction = 'like'
+                               )
+                               end,
+          'replies', json_build_object(
+            'items', coalesce((
+              select json_agg(
+                json_build_object(
+                  'id', r.id,
+                  'content', case when r.is_deleted then null else r.content end,
+                  'is_deleted', r.is_deleted,
+                  'likes_count', r.likes_count,
+                  'replies_count', r.replies_count,
+                  'created_at', r.created_at,
+                  'edited_at', r.edited_at,
+                  'author_name', r.name,
+                  'author_email', r.email,
+                  'author_image_url', r.image_url,
+                  'user_has_liked', case when v_user_id is null then false
+                                       else exists(
+                                         select 1 from public.comment_reactions cr
+                                         where cr.comment_id = r.id
+                                           and cr.user_id = v_user_id
+                                           and cr.reaction = 'like'
+                                       )
+                                       end
+                )
+                order by r.created_at asc
+              )
+              from (
+                select r.id, r.feature_id, r.parent_id, r.content, r.is_deleted, r.likes_count, 
+                       r.replies_count, r.created_at, r.edited_at, r.user_id,
+                       ru.name, ru.email, ru.image_url
+                from public.comments r
+                join public.users ru on ru.id = r.user_id
+                where r.parent_id = c.id and r.is_deleted = false
+                order by r.created_at asc
+                limit 3
+              ) r
+            ), '[]'::json),
+            'has_more', (select count(*) > 3 from public.comments where parent_id = c.id and is_deleted = false),
+            'total_count', (select count(*) from public.comments where parent_id = c.id and is_deleted = false)
+          )
+        )
+        order by c.created_at desc
+      )
+      from public.comments c
+      join public.users u on u.id = c.user_id
+      where c.feature_id = p_feature_id
+        and c.parent_id is null -- Only top-level comments
+        and c.is_deleted = false
+    )) as value
+  )
+  select
+    fd.id as feature_id,
+    fd.title as feature_title,
+    fd.description as feature_description,
+    fd.status as feature_status,
+    fd.status_label as feature_status_label,
+    fd.votes_count as feature_votes_count,
+    fd.comments_count as feature_comments_count,
+    fd.created_at as feature_created_at,
+    fd.updated_at as feature_updated_at,
+    fd.author_name as feature_author_name,
+    fd.author_email as feature_author_email,
+    fd.author_image_url as feature_author_image_url,
+    fd.user_voted as feature_user_voted,
+    cd.id as comment_id,
+    cd.content as comment_content,
+    cd.is_deleted as comment_is_deleted,
+    cd.likes_count as comment_likes_count,
+    cd.replies_count as comment_replies_count,
+    cd.created_at as comment_created_at,
+    cd.edited_at as comment_edited_at,
+    cd.author_name as comment_author_name,
+    cd.author_email as comment_author_email,
+    cd.author_image_url as comment_author_image_url,
+    cd.user_has_liked as comment_user_has_liked,
+    v_total_comments_count as comments_total_count,
+    case when v_total_comments_count > p_comments_limit then true else false end as comments_has_more
+  from feature_data fd
+  left join comments_data cd on true  -- Cartesian join to include all comments with feature data
+  where fd.id is not null -- Ensure feature exists
+  limit p_comments_limit;
+end $$;
 
 -- 7) Grants for new RPCs
 grant execute on function
@@ -2115,5 +2527,8 @@ grant execute on function
   public.soft_delete_comment_by_owner(text,uuid),
   public.admin_soft_delete_comment(text,text,uuid),
   public.get_comments_with_user_likes(text,uuid,text,integer,integer),
-  public.get_features_with_user_votes(text,text,text,text,integer,integer)
+  public.get_features_with_user_votes(text,text,text,text,integer,integer),
+  public.get_feature_with_comments(text,uuid,integer),
+  public.get_comments_with_replies(text,uuid,text,integer,integer,integer),
+  public.get_comment_replies(text,uuid,integer,integer)
 to anon, authenticated;

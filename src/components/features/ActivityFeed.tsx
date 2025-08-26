@@ -22,6 +22,7 @@ const HeartFillIcon = ({ className }: { className?: string }) => (
 import { MessageSquare, CheckCircle, Clock, AlertCircle, ChevronDown, MoreHorizontal, SortAsc, SortDesc, Sparkles } from "lucide-react";
 import { STATUS_TEXT } from "@/lib/utils/index";
 import type { Activity, Comment } from "@/types";
+import CommentForm from "./CommentForm";
 
 // Loading Components
 const LoadingSpinner = ({ size = "sm", className = "" }: { size?: "xs" | "sm" | "md" | "lg"; className?: string }) => {
@@ -81,6 +82,9 @@ interface ActivityFeedProps {
   featureId: string;
   email: string;
   name: string;
+  initialComments?: any[];
+  initialCommentsMetadata?: { total: number; hasMore: boolean };
+  onAddComment?: (addCommentFn: (comment: any) => void) => void;
 }
 
 // Sort configuration
@@ -95,7 +99,7 @@ const sortConfig = {
   },
 };
 
-export default function ActivityFeed({ featureId, email, name }: ActivityFeedProps) {
+export default function ActivityFeed({ featureId, email, name, initialComments = [], initialCommentsMetadata, onAddComment }: ActivityFeedProps) {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -106,8 +110,179 @@ export default function ActivityFeed({ featureId, email, name }: ActivityFeedPro
   const [hasMore, setHasMore] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
 
+  // Reply state
+  const [replyingTo, setReplyingTo] = useState<string | null>(null);
+  const [loadingMoreReplies, setLoadingMoreReplies] = useState<string | null>(null);
+
   // Request tracking for race condition protection
   const requestIdRef = useRef(0);
+
+  // Function to add a new comment locally to the UI
+  const addCommentLocally = useCallback(
+    (newComment: any) => {
+      const commentActivity = {
+        id: newComment.id,
+        type: "comment" as const,
+        content: newComment.content,
+        created_at: newComment.created_at,
+        author_name: newComment.author_name,
+        author_email: newComment.author_email,
+        author_image_url: newComment.author_image_url,
+        is_deleted: newComment.is_deleted || false,
+        likes_count: newComment.likes_count || 0,
+        replies_count: newComment.replies_count || 0,
+        edited_at: newComment.edited_at,
+        user_has_liked: false, // New comment, user hasn't liked it yet
+      };
+
+      setActivities((prev) => {
+        // Add to the beginning if sorting by newest, end if sorting by oldest
+        if (sortBy === "newest") {
+          return [commentActivity, ...prev];
+        } else {
+          return [...prev, commentActivity];
+        }
+      });
+
+      // Update pagination metadata (we now have one more comment)
+      setCurrentPage(1); // Reset to first page since we added a new comment
+    },
+    [sortBy]
+  );
+
+  // Function to handle reply submission
+  const handleReplyAdded = useCallback(
+    (newReply: any) => {
+      // Convert reply to activity format and add it to the feed
+      const replyActivity = {
+        id: newReply.id,
+        type: "comment" as const,
+        content: newReply.content,
+        created_at: newReply.created_at,
+        author_name: newReply.author_name,
+        author_email: newReply.author_email,
+        author_image_url: newReply.author_image_url,
+        is_deleted: newReply.is_deleted || false,
+        likes_count: newReply.likes_count || 0,
+        replies_count: newReply.replies_count || 0,
+        edited_at: newReply.edited_at,
+        user_has_liked: false, // New reply, user hasn't liked it yet
+        parent_comment_id: newReply.parent_id || newReply.parent_comment_id, // Try both field names
+      };
+
+      setActivities((prev) => {
+        // For replies, insert them right after their parent comment
+        if (replyActivity.parent_comment_id) {
+          const parentIndex = prev.findIndex((activity) => activity.id === replyActivity.parent_comment_id);
+          if (parentIndex !== -1) {
+            // Find the last reply to this parent (or the parent itself if no replies yet)
+            let insertIndex = parentIndex + 1;
+            while (insertIndex < prev.length && prev[insertIndex].parent_comment_id === replyActivity.parent_comment_id) {
+              insertIndex++;
+            }
+
+            const newActivities = [...prev];
+            newActivities.splice(insertIndex, 0, replyActivity);
+            return newActivities;
+          }
+        }
+
+        // Fallback: Add to the beginning if sorting by newest, end if sorting by oldest
+        if (sortBy === "newest") {
+          return [replyActivity, ...prev];
+        } else {
+          return [...prev, replyActivity];
+        }
+      });
+
+      // Close the reply form
+      setReplyingTo(null);
+    },
+    [sortBy]
+  );
+
+  // Function to load more replies for a specific comment
+  const handleLoadMoreReplies = useCallback(
+    async (commentId: string) => {
+      setLoadingMoreReplies(commentId);
+
+      try {
+        // Find the main comment to get current reply count
+        const mainCommentIndex = activities.findIndex((activity) => activity.id === commentId);
+        if (mainCommentIndex === -1) return;
+
+        const mainComment = activities[mainCommentIndex];
+        const currentReplyCount = activities.filter((activity) => activity.parent_comment_id === commentId).length;
+
+        const res = await fetch(
+          `/api/features/${featureId}/comments/${commentId}/replies?email=${encodeURIComponent(email)}&name=${encodeURIComponent(
+            name
+          )}&offset=${currentReplyCount}&limit=10`
+        );
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+
+        const data = await res.json();
+
+        // Convert new replies to activity format
+        const newReplyActivities: Activity[] = (data.replies || []).map((reply: Comment & { user_has_liked?: boolean }) => ({
+          id: reply.id,
+          type: "comment" as const,
+          content: reply.content,
+          created_at: reply.created_at,
+          author_name: reply.author_name,
+          author_email: reply.author_email,
+          author_image_url: reply.author_image_url,
+          is_deleted: reply.is_deleted,
+          likes_count: reply.likes_count,
+          replies_count: reply.replies_count,
+          edited_at: reply.edited_at,
+          user_has_liked: reply.user_has_liked || false,
+          parent_comment_id: reply.parent_id || commentId, // Use reply.parent_id or fallback to commentId
+        }));
+
+        // Insert new replies after the main comment and any existing replies
+        setActivities((prev) => {
+          const newActivities = [...prev];
+
+          // Find where to insert the new replies
+          let insertIndex = mainCommentIndex + 1;
+
+          // Skip over any existing replies to this comment
+          while (insertIndex < newActivities.length && newActivities[insertIndex].parent_comment_id === commentId) {
+            insertIndex++;
+          }
+
+          // Insert new replies at the correct position
+          newActivities.splice(insertIndex, 0, ...newReplyActivities);
+
+          // Update the main comment's replies_has_more flag and total count
+          const updatedMainComment = {
+            ...newActivities[mainCommentIndex],
+            replies_has_more: data.has_more,
+            replies_total_count: data.total_count, // Update with latest total from API
+          };
+          newActivities[mainCommentIndex] = updatedMainComment;
+
+          return newActivities;
+        });
+      } catch (error) {
+        console.error("Error loading more replies:", error);
+      } finally {
+        setLoadingMoreReplies(null);
+      }
+    },
+    [featureId, email, name, activities]
+  );
+
+  // Expose the addCommentLocally function to parent component
+  useEffect(() => {
+    if (onAddComment) {
+      onAddComment(addCommentLocally);
+    }
+  }, [onAddComment, addCommentLocally]);
 
   // Load a specific page with race condition protection
   const fetchPage = useCallback(
@@ -150,21 +325,51 @@ export default function ActivityFeed({ featureId, email, name }: ActivityFeedPro
           return; // Abort if superseded
         }
 
-        // Convert comments to activity format
-        const commentActivities = (data.comments || []).map((comment: Comment & { user_has_liked?: boolean }) => ({
-          id: comment.id,
-          type: "comment" as const,
-          content: comment.content,
-          created_at: comment.created_at,
-          author_name: comment.author_name,
-          author_email: comment.author_email,
-          author_image_url: comment.author_image_url,
-          is_deleted: comment.is_deleted,
-          likes_count: comment.likes_count,
-          replies_count: comment.replies_count,
-          edited_at: comment.edited_at,
-          user_has_liked: comment.user_has_liked || false,
-        }));
+        // Convert comments with replies to activity format
+        const commentActivities: Activity[] = [];
+
+        (data.comments || []).forEach(
+          (comment: Comment & { user_has_liked?: boolean; replies?: { items: any[]; has_more: boolean; total_count: number } }) => {
+            // Add main comment
+            commentActivities.push({
+              id: comment.id,
+              type: "comment" as const,
+              content: comment.content,
+              created_at: comment.created_at,
+              author_name: comment.author_name,
+              author_email: comment.author_email,
+              author_image_url: comment.author_image_url,
+              is_deleted: comment.is_deleted,
+              likes_count: comment.likes_count,
+              replies_count: comment.replies_count,
+              edited_at: comment.edited_at,
+              user_has_liked: comment.user_has_liked || false,
+              replies_has_more: comment.replies?.has_more || false,
+              replies_total_count: comment.replies?.total_count || 0,
+            });
+
+            // Add replies if any
+            if (comment.replies?.items && Array.isArray(comment.replies.items)) {
+              comment.replies.items.forEach((reply: Comment & { user_has_liked?: boolean }) => {
+                commentActivities.push({
+                  id: reply.id,
+                  type: "comment" as const,
+                  content: reply.content,
+                  created_at: reply.created_at,
+                  author_name: reply.author_name,
+                  author_email: reply.author_email,
+                  author_image_url: reply.author_image_url,
+                  is_deleted: reply.is_deleted,
+                  likes_count: reply.likes_count,
+                  replies_count: reply.replies_count,
+                  edited_at: reply.edited_at,
+                  user_has_liked: reply.user_has_liked || false,
+                  parent_comment_id: reply.parent_id || comment.id, // Use reply.parent_id or fallback to comment.id
+                });
+              });
+            }
+          }
+        );
 
         if (isLoadMore) {
           setActivities((prev) => {
@@ -196,24 +401,88 @@ export default function ActivityFeed({ featureId, email, name }: ActivityFeedPro
     [featureId, email, name, sortBy]
   );
 
-  const loadActivities = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      await fetchPage(1, false);
-    } catch (error) {
-      console.error("Error loading initial data:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [fetchPage]);
-
+  // Initialize with provided comments or fetch if needed
   useEffect(() => {
-    loadActivities();
-  }, [loadActivities]);
+    if (initialComments && initialCommentsMetadata && sortBy === "newest") {
+      // Use provided initial comments with replies (newest sort only, as that's what the backend provides)
+      const commentActivities: Activity[] = [];
+
+      initialComments.forEach(
+        (comment: Comment & { user_has_liked?: boolean; replies?: { items: any[]; has_more: boolean; total_count: number } }) => {
+          // Add main comment
+          commentActivities.push({
+            id: comment.id,
+            type: "comment" as const,
+            content: comment.content,
+            created_at: comment.created_at,
+            author_name: comment.author_name,
+            author_email: comment.author_email,
+            author_image_url: comment.author_image_url,
+            is_deleted: comment.is_deleted,
+            likes_count: comment.likes_count,
+            replies_count: comment.replies_count,
+            edited_at: comment.edited_at,
+            user_has_liked: comment.user_has_liked || false,
+            replies_has_more: comment.replies?.has_more || false,
+            replies_total_count: comment.replies?.total_count || 0,
+          });
+
+          // Add replies if any
+          if (comment.replies?.items && Array.isArray(comment.replies.items)) {
+            comment.replies.items.forEach((reply: Comment & { user_has_liked?: boolean }) => {
+              commentActivities.push({
+                id: reply.id,
+                type: "comment" as const,
+                content: reply.content,
+                created_at: reply.created_at,
+                author_name: reply.author_name,
+                author_email: reply.author_email,
+                author_image_url: reply.author_image_url,
+                is_deleted: reply.is_deleted,
+                likes_count: reply.likes_count,
+                replies_count: reply.replies_count,
+                edited_at: reply.edited_at,
+                user_has_liked: reply.user_has_liked || false,
+                parent_comment_id: reply.parent_id || comment.id, // Use reply.parent_id or fallback to comment.id
+              });
+            });
+          }
+        }
+      );
+
+      setActivities(commentActivities);
+      setCurrentPage(commentActivities.length > 0 ? 1 : 0);
+      setHasMore(initialCommentsMetadata.hasMore);
+      setIsLoading(false);
+      setError(null);
+    } else {
+      // Need to fetch from API (either no initial comments provided, or different sort order)
+      const loadActivities = async () => {
+        setIsLoading(true);
+        try {
+          await fetchPage(1, false);
+        } catch (error) {
+          console.error("Error loading initial data:", error);
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      loadActivities();
+    }
+  }, [initialComments, initialCommentsMetadata, sortBy, fetchPage]);
 
   // Listen for comment added events to refresh the feed
   useEffect(() => {
+    let isInitialLoad = true;
+
     const handleRefresh = async () => {
+      // Skip refresh on initial load to avoid duplicate API request
+      if (isInitialLoad) {
+        isInitialLoad = false;
+        return;
+      }
+
       setIsLoading(true);
       try {
         await fetchPage(1, false);
@@ -315,7 +584,11 @@ export default function ActivityFeed({ featureId, email, name }: ActivityFeedPro
     });
   };
 
-  const getUserAvatar = (authorName: string) => {
+  const getUserAvatar = (authorName: string, imageUrl?: string) => {
+    if (imageUrl) {
+      return <img src={imageUrl} alt={authorName} className="w-8 h-8 rounded-full object-cover flex-shrink-0" />;
+    }
+
     const initial = (authorName || "U").charAt(0).toUpperCase();
     const colors = ["bg-red-500", "bg-blue-500", "bg-green-500", "bg-yellow-500", "bg-purple-500", "bg-pink-500", "bg-indigo-500", "bg-orange-500"];
     const colorIndex = authorName.length % colors.length;
@@ -429,139 +702,283 @@ export default function ActivityFeed({ featureId, email, name }: ActivityFeedPro
     );
   }
 
+  // Don't render the component if there are no activities
+  if (activities.length === 0) {
+    return null;
+  }
+
   return (
-    <Card className="shadow-xs">
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <h3 className="text-base sm:text-base md:text-lg lg:text-lg font-semibold">Activity Feed</h3>
-          <div className="flex items-center gap-2">
-            <span className="text-xs sm:text-sm text-gray-500">Sort by</span>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="h-9 text-xs justify-between px-3">
-                  <div className="flex items-center gap-2">
-                    {React.createElement(sortConfig[sortBy].icon, {
-                      className: "w-3 h-3 text-muted-foreground",
-                    })}
-                    <span className="text-foreground">{sortConfig[sortBy].label}</span>
-                  </div>
-                  <ChevronDown className="w-3 h-3" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-full min-w-[140px]">
-                {Object.entries(sortConfig).map(([sortKey, sortInfo]) => (
-                  <DropdownMenuItem
-                    key={sortKey}
-                    onClick={() => setSortBy(sortKey as "newest" | "oldest")}
-                    className={sortBy === sortKey ? "bg-accent" : ""}
-                  >
-                    <div className="flex items-center gap-2 w-full">
-                      {React.createElement(sortInfo.icon, {
-                        className: "w-4 h-4",
+    <>
+      <Card className="shadow-xs">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <h3 className="text-base sm:text-base md:text-lg lg:text-lg font-semibold">Activity Feed</h3>
+            <div className="flex items-center gap-2">
+              <span className="text-xs sm:text-sm text-gray-500">Sort by</span>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="h-9 text-xs justify-between px-3">
+                    <div className="flex items-center gap-2">
+                      {React.createElement(sortConfig[sortBy].icon, {
+                        className: "w-3 h-3 text-muted-foreground",
                       })}
-                      <span>{sortInfo.label}</span>
+                      <span className="text-foreground">{sortConfig[sortBy].label}</span>
                     </div>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                    <ChevronDown className="w-3 h-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-full min-w-[140px]">
+                  {Object.entries(sortConfig).map(([sortKey, sortInfo]) => (
+                    <DropdownMenuItem
+                      key={sortKey}
+                      onClick={() => setSortBy(sortKey as "newest" | "oldest")}
+                      className={sortBy === sortKey ? "bg-accent" : ""}
+                    >
+                      <div className="flex items-center gap-2 w-full">
+                        {React.createElement(sortInfo.icon, {
+                          className: "w-4 h-4",
+                        })}
+                        <span>{sortInfo.label}</span>
+                      </div>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
-        </div>
-      </CardHeader>
+        </CardHeader>
 
-      <CardContent className="space-y-4">
-        {activities.length === 0 ? (
-          <div className="text-center py-6 sm:py-8">
-            <MessageSquare className="w-10 h-10 sm:w-12 sm:h-12 text-gray-300 mx-auto mb-4" />
-            <p className="text-gray-500 text-sm">No activity yet</p>
-            <p className="text-gray-400 text-xs mt-1">Be the first to leave a comment!</p>
-          </div>
-        ) : (
-          <>
-            {activities.map((activity) => (
-              <div key={activity.id} className="flex items-start gap-3 pb-4 border-b border-gray-100 last:border-b-0 last:pb-0">
-                <div className="flex-shrink-0 ">{getUserAvatar(activity.author_name)}</div>
+        <CardContent className="space-y-4">
+          {activities
+            .filter((activity) => !activity.parent_comment_id) // Only render main comments first
+            .map((mainComment, mainIndex) => {
+              // Get all replies for this main comment
+              const replies = activities.filter((activity) => activity.parent_comment_id === mainComment.id);
+              const isLastMainComment = mainIndex === activities.filter((a) => !a.parent_comment_id).length - 1;
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="font-semibold text-gray-900 text-sm capitalize">{activity.author_name}</span>
-                        {activity.type === "status_change" && (
-                          <div className="text-xs text-gray-500">
-                            marked this post as{" "}
-                            <Badge variant="secondary" className="text-xs">
-                              {STATUS_TEXT[activity.new_status || ""] || "Unknown"}
-                            </Badge>
+              return (
+                <div key={mainComment.id} className={`pb-4 ${!isLastMainComment ? "border-b border-gray-100" : ""}`}>
+                  {/* Main Comment */}
+                  <div className="flex items-start gap-3">
+                    <div className="flex-shrink-0">{getUserAvatar(mainComment.author_name, mainComment.author_image_url)}</div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="font-semibold text-gray-900 text-sm capitalize">{mainComment.author_name}</span>
+                            {mainComment.type === "status_change" && (
+                              <div className="text-xs text-gray-500">
+                                marked this post as{" "}
+                                <Badge variant="secondary" className="text-xs">
+                                  {STATUS_TEXT[mainComment.new_status || ""] || "Unknown"}
+                                </Badge>
+                              </div>
+                            )}
+                            {mainComment.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
                           </div>
-                        )}
-                        {activity.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
+
+                          {mainComment.is_deleted ? (
+                            <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
+                          ) : (
+                            mainComment.content && <div className="text-sm text-gray-700 mt-1 leading-relaxed">{mainComment.content}</div>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <Button variant="ghost" size="sm" className="w-6 h-6 p-0">
+                            <MoreHorizontal className="w-3 h-3" />
+                          </Button>
+                        </div>
                       </div>
 
-                      {activity.is_deleted ? (
-                        <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
-                      ) : (
-                        activity.content && <div className="text-sm text-gray-700 mt-1 leading-relaxed">{activity.content}</div>
-                      )}
-                    </div>
+                      <div className="flex items-center gap-2 mt-3">
+                        {mainComment.type === "comment" && !mainComment.is_deleted && (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-xs text-gray-500 h-6 !px-0 hover:bg-transparent hover:text-primary"
+                              onClick={() => handleToggleLike(mainComment.id)}
+                            >
+                              {mainComment.user_has_liked ? (
+                                <HeartFillIcon className="w-2.5 h-2.5 mr-1 text-primary" />
+                              ) : (
+                                <HeartIcon className="w-2.5 h-2.5 mr-1" />
+                              )}
+                              <span className={(mainComment.likes_count || 0) > 0 ? "inline-block animate-[slideInRight_0.3s_ease-out]" : ""}>
+                                {(mainComment.likes_count || 0) > 0 &&
+                                  ((mainComment.likes_count || 0) === 1 ? "1 like" : `${mainComment.likes_count || 0} likes`)}
+                              </span>
+                            </Button>
+                            <span className="text-xs text-gray-400">•</span>
+                          </>
+                        )}
+                        <span className="text-xs text-gray-500">{formatTimeAgo(mainComment.created_at)}</span>
+                        {mainComment.type === "comment" && !mainComment.is_deleted && (
+                          <>
+                            <span className="text-xs text-gray-400">•</span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-xs text-gray-500 h-6 px-2"
+                              onClick={() => setReplyingTo(mainComment.id === replyingTo ? null : mainComment.id)}
+                            >
+                              {replyingTo === mainComment.id ? "Cancel" : "Reply"}
+                            </Button>
+                          </>
+                        )}
 
-                    <div className="flex items-center gap-2 flex-shrink-0">
-                      <Button variant="ghost" size="sm" className="w-6 h-6 p-0">
-                        <MoreHorizontal className="w-3 h-3" />
-                      </Button>
+                        {mainComment.edited_at && (
+                          <>
+                            <span className="text-xs text-gray-400">•</span>
+                            <span className="text-xs text-gray-400">edited</span>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 mt-3">
-                    {activity.type === "comment" && !activity.is_deleted && (
-                      <>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-xs text-gray-500 h-6 !px-0 hover:bg-transparent hover:text-primary"
-                          onClick={() => handleToggleLike(activity.id)}
-                        >
-                          {activity.user_has_liked ? (
-                            <HeartFillIcon className="w-2.5 h-2.5 mr-1 text-primary" />
-                          ) : (
-                            <HeartIcon className="w-2.5 h-2.5 mr-1" />
-                          )}
-                          <span className={(activity.likes_count || 0) > 0 ? "inline-block animate-[slideInRight_0.3s_ease-out]" : ""}>
-                            {(activity.likes_count || 0) > 0 && ((activity.likes_count || 0) === 1 ? "1 like" : `${activity.likes_count || 0} likes`)}
-                          </span>
-                        </Button>
-                        <span className="text-xs text-gray-400">•</span>
-                      </>
-                    )}
-                    <span className="text-xs text-gray-500">{formatTimeAgo(activity.created_at)}</span>
-                    {activity.type === "comment" && !activity.is_deleted && (
-                      <>
-                        <span className="text-xs text-gray-400">•</span>
-                        <Button variant="ghost" size="sm" className="text-xs text-gray-500 h-6 px-2">
-                          Reply
-                        </Button>
-                      </>
-                    )}
-                    {activity.edited_at && (
-                      <>
-                        <span className="text-xs text-gray-400">•</span>
-                        <span className="text-xs text-gray-400">edited</span>
-                      </>
-                    )}
-                  </div>
+                  {/* Reply form for this comment */}
+                  {replyingTo === mainComment.id && (
+                    <div className="mt-3 ml-11">
+                      <CommentForm
+                        featureId={featureId}
+                        email={email}
+                        name={name}
+                        parentCommentId={mainComment.id}
+                        placeholder={`Reply to ${mainComment.author_name}...`}
+                        onCommentAdded={handleReplyAdded}
+                        isFocused={true}
+                        isReply={true}
+                      />
+                    </div>
+                  )}
+
+                  {/* Replies */}
+                  {replies.length > 0 && (
+                    <div className="mt-3 space-y-3">
+                      {replies.map((reply, replyIndex) => {
+                        const isLastReply = replyIndex === replies.length - 1;
+
+                        return (
+                          <div key={reply.id} className="ml-11">
+                            <div className="flex items-start gap-3">
+                              <div className="flex-shrink-0">{getUserAvatar(reply.author_name, reply.author_image_url)}</div>
+
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex-1">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      <span className="font-semibold text-gray-900 text-sm capitalize">{reply.author_name}</span>
+                                      {reply.type === "status_change" && (
+                                        <div className="text-xs text-gray-500">
+                                          marked this post as{" "}
+                                          <Badge variant="secondary" className="text-xs">
+                                            {STATUS_TEXT[reply.new_status || ""] || "Unknown"}
+                                          </Badge>
+                                        </div>
+                                      )}
+                                      {reply.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
+                                    </div>
+
+                                    {reply.is_deleted ? (
+                                      <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
+                                    ) : (
+                                      reply.content && <div className="text-sm text-gray-700 mt-1 leading-relaxed">{reply.content}</div>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-2 flex-shrink-0">
+                                    <Button variant="ghost" size="sm" className="w-6 h-6 p-0">
+                                      <MoreHorizontal className="w-3 h-3" />
+                                    </Button>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 mt-3">
+                                  {reply.type === "comment" && !reply.is_deleted && (
+                                    <>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="text-xs text-gray-500 h-6 !px-0 hover:bg-transparent hover:text-primary"
+                                        onClick={() => handleToggleLike(reply.id)}
+                                      >
+                                        {reply.user_has_liked ? (
+                                          <HeartFillIcon className="w-2.5 h-2.5 mr-1 text-primary" />
+                                        ) : (
+                                          <HeartIcon className="w-2.5 h-2.5 mr-1" />
+                                        )}
+                                        <span className={(reply.likes_count || 0) > 0 ? "inline-block animate-[slideInRight_0.3s_ease-out]" : ""}>
+                                          {(reply.likes_count || 0) > 0 &&
+                                            ((reply.likes_count || 0) === 1 ? "1 like" : `${reply.likes_count || 0} likes`)}
+                                        </span>
+                                      </Button>
+                                      <span className="text-xs text-gray-400">•</span>
+                                    </>
+                                  )}
+                                  <span className="text-xs text-gray-500">{formatTimeAgo(reply.created_at)}</span>
+                                  {reply.edited_at && (
+                                    <>
+                                      <span className="text-xs text-gray-400">•</span>
+                                      <span className="text-xs text-gray-400">edited</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* View more replies button for the last reply */}
+                            {isLastReply && mainComment.replies_has_more && (
+                              <div className="mt-2">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => handleLoadMoreReplies(mainComment.id)}
+                                  disabled={loadingMoreReplies === mainComment.id}
+                                  className="text-xs text-gray-500 hover:text-blue-600 h-6"
+                                >
+                                  {loadingMoreReplies === mainComment.id ? (
+                                    <>
+                                      <LoadingSpinner size="xs" className="mr-1" />
+                                      Loading...
+                                    </>
+                                  ) : (
+                                    (() => {
+                                      const remainingReplies = mainComment.replies_total_count! - replies.length;
+                                      return remainingReplies > 10
+                                        ? "View 10 more replies"
+                                        : `View ${remainingReplies} more ${remainingReplies === 1 ? "reply" : "replies"}`;
+                                    })()
+                                  )}
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
 
-            {/* Sentinel for infinite scroll */}
-            <div ref={sentinelRef} />
+          {/* Sentinel for infinite scroll */}
+          <div ref={sentinelRef} />
 
-            {/* Enhanced loading states */}
-            <LoadMoreIndicator isVisible={isLoadingMore} />
-            <EndOfListIndicator show={!hasMore && !isLoadingMore} count={activities.length} />
-          </>
-        )}
-      </CardContent>
-    </Card>
+          {/* Enhanced loading states */}
+        </CardContent>
+
+        {/* End of main comments indicator - only show when no more main comments to load */}
+      </Card>
+
+      {/* Loading indicator outside the card for infinite scroll */}
+      <LoadMoreIndicator isVisible={isLoadingMore} />
+      <EndOfListIndicator
+        show={!hasMore && !isLoadingMore && !isLoading && activities.filter((a) => !a.parent_comment_id).length > 0}
+        count={activities.filter((a) => !a.parent_comment_id).length}
+      />
+    </>
   );
 }
