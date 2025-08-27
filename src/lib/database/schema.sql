@@ -1779,9 +1779,9 @@ begin
   v_user := public.ensure_user(p_email, p_name, p_image_url);
   perform public.app_activate(v_user, false);
 
-  -- Replies: enforce same feature & only one level deep
+  -- Replies: enforce same feature (allow unlimited nesting depth)
   if p_parent_comment_id is not null then
-    select feature_id, parent_id into v_parent_feature, v_parent_parent
+    select feature_id into v_parent_feature
     from public.comments where id = p_parent_comment_id;
 
     if v_parent_feature is null then
@@ -1789,9 +1789,6 @@ begin
     end if;
     if v_parent_feature <> p_feature_id then
       raise exception 'parent comment belongs to a different feature';
-    end if;
-    if v_parent_parent is not null then
-      raise exception 'only one level of replies is allowed';
     end if;
   end if;
 
@@ -2106,7 +2103,7 @@ begin
 end;
 $$;
 
--- (D) get_comments_with_replies - Get comments with nested replies for activity feed
+-- (D) get_comments_with_replies - Get comments with paginated replies (including nested) in flat structure
 create or replace function public.get_comments_with_replies(
   p_email text,
   p_feature_id uuid,
@@ -2136,9 +2133,9 @@ begin
   -- Validate and sanitize pagination parameters
   p_limit := greatest(1, least(coalesce(p_limit, 10), 50)); -- Between 1 and 50
   p_offset := greatest(0, coalesce(p_offset, 0)); -- Non-negative
+  p_replies_limit := greatest(1, least(coalesce(p_replies_limit, 5), 20)); -- Between 1 and 20
 
-  -- Get top-level comments with their replies in a nested JSON structure
-  -- First, get the paginated comments, then build JSON
+  -- Get top-level comments with paginated replies (including nested replies in flat structure)
   select json_agg(
     json_build_object(
       'id', paginated_comments.id,
@@ -2155,45 +2152,89 @@ begin
       'author_image_url', paginated_comments.author_image_url,
       'user_has_liked', paginated_comments.user_has_liked,
       'replies', coalesce((
-        select json_build_object(
-          'items', json_agg(
-            json_build_object(
-              'id', r.id,
-              'feature_id', r.feature_id,
-              'parent_id', r.parent_id,
-              'content', case when r.is_deleted then null else r.content end,
-              'is_deleted', r.is_deleted,
-              'likes_count', r.likes_count,
-              'replies_count', r.replies_count,
-              'created_at', r.created_at,
-              'edited_at', r.edited_at,
-              'author_name', r.name,
-              'author_email', r.email,
-              'author_image_url', r.image_url,
-              'user_has_liked', case when v_user_id is null then false
-                                   else exists(
-                                     select 1 from public.comment_reactions cr
-                                     where cr.comment_id = r.id
-                                       and cr.user_id = v_user_id
-                                       and cr.reaction = 'like'
-                                   )
-                                   end
+        (
+          select json_build_object(
+            'items', coalesce(json_agg(
+              json_build_object(
+                'id', flat_replies.id,
+                'feature_id', flat_replies.feature_id,
+                'parent_id', flat_replies.parent_id,
+                'content', case when flat_replies.is_deleted then null else flat_replies.content end,
+                'is_deleted', flat_replies.is_deleted,
+                'likes_count', flat_replies.likes_count,
+                'replies_count', flat_replies.replies_count,
+                'created_at', flat_replies.created_at,
+                'edited_at', flat_replies.edited_at,
+                'author_name', flat_replies.name,
+                'author_email', flat_replies.email,
+                'author_image_url', flat_replies.image_url,
+                'user_has_liked', case when v_user_id is null then false
+                                     else exists(
+                                       select 1 from public.comment_reactions cr
+                                       where cr.comment_id = flat_replies.id
+                                         and cr.user_id = v_user_id
+                                         and cr.reaction = 'like'
+                                     )
+                                     end
+              )
+              order by flat_replies.created_at asc
+            ), '[]'::json),
+            'has_more', (
+              -- Count total replies for this comment and check if more than limit
+              with recursive total_reply_tree as (
+                select id from public.comments 
+                where parent_id = paginated_comments.id and is_deleted = false
+                
+                union all
+                
+                select c.id from public.comments c
+                inner join total_reply_tree trt on c.parent_id = trt.id
+                where c.is_deleted = false
+              )
+              select count(*) > p_replies_limit from total_reply_tree
+            ),
+            'total_count', (
+              -- Count total replies for this comment
+              with recursive total_reply_tree as (
+                select id from public.comments 
+                where parent_id = paginated_comments.id and is_deleted = false
+                
+                union all
+                
+                select c.id from public.comments c
+                inner join total_reply_tree trt on c.parent_id = trt.id
+                where c.is_deleted = false
+              )
+              select count(*) from total_reply_tree
             )
-            order by r.created_at asc
-          ),
-          'has_more', (select count(*) > p_replies_limit from public.comments where parent_id = paginated_comments.id and is_deleted = false),
-          'total_count', (select count(*) from public.comments where parent_id = paginated_comments.id and is_deleted = false)
+          )
+          from (
+            -- Get all replies in chronological order (flat structure) with pagination
+            with recursive reply_tree as (
+              -- Direct replies to main comment
+              select r.id, r.feature_id, r.parent_id, r.content, r.is_deleted, 
+                     r.likes_count, r.replies_count, r.created_at, r.edited_at, r.user_id,
+                     ru.name, ru.email, ru.image_url, r.created_at as sort_time
+              from public.comments r
+              join public.users ru on ru.id = r.user_id
+              where r.parent_id = paginated_comments.id and r.is_deleted = false
+              
+              union all
+              
+              -- Replies to replies (recursive) - maintain chronological order
+              select c.id, c.feature_id, c.parent_id, c.content, c.is_deleted,
+                     c.likes_count, c.replies_count, c.created_at, c.edited_at, c.user_id,
+                     cu.name, cu.email, cu.image_url, c.created_at as sort_time
+              from public.comments c
+              join public.users cu on cu.id = c.user_id
+              inner join reply_tree rt on c.parent_id = rt.id
+              where c.is_deleted = false
+            )
+            select * from reply_tree
+            order by sort_time asc
+            limit p_replies_limit
+          ) flat_replies
         )
-        from (
-          select r.id, r.feature_id, r.parent_id, r.content, r.is_deleted, r.likes_count, 
-                 r.replies_count, r.created_at, r.edited_at, r.user_id,
-                 ru.name, ru.email, ru.image_url
-          from public.comments r
-          join public.users ru on ru.id = r.user_id
-          where r.parent_id = paginated_comments.id and r.is_deleted = false
-          order by r.created_at asc
-          limit p_replies_limit
-        ) r
       ), json_build_object('items', '[]'::json, 'has_more', false, 'total_count', 0))
     )
   ) into v_result
@@ -2236,7 +2277,7 @@ begin
 end;
 $$;
 
--- (E) get_comment_replies - Get paginated replies for a specific comment
+-- (E) get_comment_replies - Get paginated replies (including ALL nested) for a specific comment in flat structure
 create or replace function public.get_comment_replies(
   p_email text,
   p_comment_id uuid,
@@ -2248,6 +2289,7 @@ declare
   v_email_param text;
   v_parent_feature uuid;
   v_result json;
+  v_total_count integer;
 begin
   -- Store the email parameter in a local variable to avoid any conflicts
   v_email_param := lower(trim(coalesce(p_email, '')));
@@ -2270,47 +2312,78 @@ begin
   p_limit := greatest(1, least(coalesce(p_limit, 10), 50)); -- Between 1 and 50
   p_offset := greatest(0, coalesce(p_offset, 0)); -- Non-negative
 
-  -- Get replies with pagination
+  -- Get total count of ALL replies in thread
+  with recursive total_reply_tree as (
+    -- Direct replies to comment
+    select id from public.comments 
+    where parent_id = p_comment_id and is_deleted = false
+    
+    union all
+    
+    -- Replies to replies (recursive)
+    select c.id from public.comments c
+    inner join total_reply_tree trt on c.parent_id = trt.id
+    where c.is_deleted = false
+  )
+  select count(*) into v_total_count from total_reply_tree;
+
+  -- Get replies with pagination (all nested replies in flat chronological order)
   select json_build_object(
     'replies', coalesce(json_agg(
       json_build_object(
-        'id', r.id,
-        'feature_id', r.feature_id,
-        'parent_id', r.parent_id,
-        'content', case when r.is_deleted then null else r.content end,
-        'is_deleted', r.is_deleted,
-        'likes_count', r.likes_count,
-        'replies_count', r.replies_count,
-        'created_at', r.created_at,
-        'edited_at', r.edited_at,
-        'author_name', r.name,
-        'author_email', r.email,
-        'author_image_url', r.image_url,
+        'id', flat_replies.id,
+        'feature_id', flat_replies.feature_id,
+        'parent_id', flat_replies.parent_id,
+        'content', case when flat_replies.is_deleted then null else flat_replies.content end,
+        'is_deleted', flat_replies.is_deleted,
+        'likes_count', flat_replies.likes_count,
+        'replies_count', flat_replies.replies_count,
+        'created_at', flat_replies.created_at,
+        'edited_at', flat_replies.edited_at,
+        'author_name', flat_replies.name,
+        'author_email', flat_replies.email,
+        'author_image_url', flat_replies.image_url,
         'user_has_liked', case when v_user_id is null then false
                              else exists(
                                select 1 from public.comment_reactions cr
-                               where cr.comment_id = r.id
+                               where cr.comment_id = flat_replies.id
                                  and cr.user_id = v_user_id
                                  and cr.reaction = 'like'
                              )
                              end
       )
-      order by r.created_at asc
+      order by flat_replies.created_at asc
     ), '[]'::json),
-    'has_more', (select count(*) > (p_offset + p_limit) from public.comments where parent_id = p_comment_id and is_deleted = false),
-    'total_count', (select count(*) from public.comments where parent_id = p_comment_id and is_deleted = false)
+    'has_more', (v_total_count > (p_offset + p_limit)),
+    'total_count', v_total_count
   ) into v_result
   from (
-    select r.id, r.feature_id, r.parent_id, r.content, r.is_deleted, r.likes_count, 
-           r.replies_count, r.created_at, r.edited_at, r.user_id,
-           ru.name, ru.email, ru.image_url
-    from public.comments r
-    join public.users ru on ru.id = r.user_id
-    where r.parent_id = p_comment_id and r.is_deleted = false
-    order by r.created_at asc
+    -- Get all replies in chronological order (flat structure) with pagination
+    with recursive reply_tree as (
+      -- Direct replies to comment
+      select r.id, r.feature_id, r.parent_id, r.content, r.is_deleted, 
+             r.likes_count, r.replies_count, r.created_at, r.edited_at, r.user_id,
+             ru.name, ru.email, ru.image_url, r.created_at as sort_time
+      from public.comments r
+      join public.users ru on ru.id = r.user_id
+      where r.parent_id = p_comment_id and r.is_deleted = false
+      
+      union all
+      
+      -- Replies to replies (recursive) - maintain chronological order
+      select c.id, c.feature_id, c.parent_id, c.content, c.is_deleted,
+             c.likes_count, c.replies_count, c.created_at, c.edited_at, c.user_id,
+             cu.name, cu.email, cu.image_url, c.created_at as sort_time
+      from public.comments c
+      join public.users cu on cu.id = c.user_id
+      inner join reply_tree rt on c.parent_id = rt.id
+      where c.is_deleted = false
+    )
+    select * from reply_tree
+    order by sort_time asc
     limit p_limit
     offset p_offset
-  ) r;
+  ) flat_replies;
 
   return coalesce(v_result, json_build_object('replies', '[]'::json, 'has_more', false, 'total_count', 0));
 end;
