@@ -465,7 +465,7 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
                                     </AlertDialogHeader>
                                     <AlertDialogFooter>
                                       <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                      <AlertDialogAction onClick={handleDeleteFeature} className="bg-red-600 hover:bg-red-700">
+                                      <AlertDialogAction onClick={handleDeleteFeature} className="bg-red-600 hover:bg-red-700 text-white">
                                         {isDeletingFeature ? (
                                           <>
                                             <Loader2 className="w-4 h-4 mr-2 animate-spin" />

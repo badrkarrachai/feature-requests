@@ -11,11 +11,23 @@ import { ChangePasswordModal } from "@/components/admin/ChangePasswordModal";
 import { AdminAuthProvider, useAdminAuth } from "@/hooks/useAdminAuth";
 import { DarkModeProvider } from "@/hooks/useDarkMode";
 import type { AdminTabType } from "@/types/admin";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 
 function AdminContent() {
   const { isAuthenticated, currentAdmin, isLoading, logout } = useAdminAuth();
   const [activeTab, setActiveTab] = useState<AdminTabType>("dashboard");
   const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -106,9 +118,27 @@ function AdminContent() {
                 </div>
               </div>
               <DarkModeToggle />
-              <button onClick={logout} className="p-2 rounded-lg bg-secondary hover:bg-accent transition-colors border border-border" title="Logout">
-                <LogOut className="w-4 h-4 text-muted-foreground" />
-              </button>
+              <AlertDialog open={showLogoutConfirm} onOpenChange={setShowLogoutConfirm}>
+                <AlertDialogTrigger asChild>
+                  <button className="p-2 rounded-lg bg-secondary hover:bg-accent transition-colors border border-border" title="Logout">
+                    <LogOut className="w-4 h-4 text-muted-foreground" />
+                  </button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Confirm Logout</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Are you sure you want to log out? You'll need to sign in again to access the admin panel.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={logout} className="bg-destructive text-destructive-foreground hover:bg-destructive/90 text-white">
+                      Logout
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </div>
           </div>
         </div>
