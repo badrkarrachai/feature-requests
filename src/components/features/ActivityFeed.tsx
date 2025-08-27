@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Textarea } from "@/components/ui/textarea";
 // Bootstrap Heart Icons
 const HeartIcon = ({ className }: { className?: string }) => (
   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" className={className} viewBox="0 0 16 16">
@@ -19,7 +20,20 @@ const HeartFillIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
-import { MessageSquare, CheckCircle, Clock, AlertCircle, ChevronDown, MoreHorizontal, SortAsc, SortDesc, Sparkles } from "lucide-react";
+import {
+  MessageSquare,
+  CheckCircle,
+  Clock,
+  AlertCircle,
+  ChevronDown,
+  MoreHorizontal,
+  SortAsc,
+  SortDesc,
+  Sparkles,
+  Loader2,
+  Edit,
+  Trash2,
+} from "lucide-react";
 import { STATUS_TEXT } from "@/lib/utils/index";
 import type { Activity, Comment } from "@/types";
 import CommentForm from "./CommentForm";
@@ -114,6 +128,12 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [loadingMoreReplies, setLoadingMoreReplies] = useState<string | null>(null);
 
+  // Dropdown menu state
+  const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState<string>("");
+  const [loadingCommentId, setLoadingCommentId] = useState<string | null>(null);
+
   // Request tracking for race condition protection
   const requestIdRef = useRef(0);
 
@@ -133,15 +153,21 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         replies_count: newComment.replies_count || 0,
         edited_at: newComment.edited_at,
         user_has_liked: false, // New comment, user hasn't liked it yet
+        parent_comment_id: newComment.parent_id || null,
       };
 
       setActivities((prev) => {
-        // Add to the beginning if sorting by newest, end if sorting by oldest
-        if (sortBy === "newest") {
-          return [commentActivity, ...prev];
-        } else {
-          return [...prev, commentActivity];
+        // If it's a top-level comment, add to beginning/end based on sort
+        if (!commentActivity.parent_comment_id) {
+          if (sortBy === "newest") {
+            return [commentActivity, ...prev];
+          } else {
+            return [...prev, commentActivity];
+          }
         }
+
+        // For replies, add after the parent (we'll handle this in handleReplyAdded)
+        return prev;
       });
 
       // Update pagination metadata (we now have one more comment)
@@ -171,13 +197,25 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
       };
 
       setActivities((prev) => {
-        // For replies, insert them right after their parent comment
+        // For replies, insert them right after their parent comment and any existing replies
         if (replyActivity.parent_comment_id) {
           const parentIndex = prev.findIndex((activity) => activity.id === replyActivity.parent_comment_id);
           if (parentIndex !== -1) {
-            // Find the last reply to this parent (or the parent itself if no replies yet)
+            // Find the last activity that's related to this parent (including nested replies)
             let insertIndex = parentIndex + 1;
-            while (insertIndex < prev.length && prev[insertIndex].parent_comment_id === replyActivity.parent_comment_id) {
+
+            // Function to check if an activity is a descendant of the parent
+            const isDescendantOf = (activity: Activity, ancestorId: string): boolean => {
+              if (activity.parent_comment_id === ancestorId) return true;
+              if (!activity.parent_comment_id) return false;
+
+              // Check if any activity is the parent of this one and is a descendant
+              const immediateParent = prev.find((a) => a.id === activity.parent_comment_id);
+              return immediateParent ? isDescendantOf(immediateParent, ancestorId) : false;
+            };
+
+            // Skip over all descendants of the parent
+            while (insertIndex < prev.length && isDescendantOf(prev[insertIndex], replyActivity.parent_comment_id)) {
               insertIndex++;
             }
 
@@ -201,6 +239,31 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
     [sortBy]
   );
 
+  // Function to get all replies in a thread
+  const getAllRepliesInThread = useCallback(
+    (mainCommentId: string): Activity[] => {
+      const allThreadReplies: Activity[] = [];
+      const visited = new Set<string>();
+
+      const findReplies = (parentId: string) => {
+        const directReplies = activities.filter((activity) => activity.parent_comment_id === parentId && !visited.has(activity.id));
+
+        directReplies.forEach((reply) => {
+          if (!visited.has(reply.id)) {
+            visited.add(reply.id);
+            allThreadReplies.push(reply);
+            // Recursively find replies to this reply
+            findReplies(reply.id);
+          }
+        });
+      };
+
+      findReplies(mainCommentId);
+      return allThreadReplies;
+    },
+    [activities]
+  );
+
   // Function to load more replies for a specific comment
   const handleLoadMoreReplies = useCallback(
     async (commentId: string) => {
@@ -212,7 +275,8 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         if (mainCommentIndex === -1) return;
 
         const mainComment = activities[mainCommentIndex];
-        const currentReplyCount = activities.filter((activity) => activity.parent_comment_id === commentId).length;
+        // Count ALL replies in this thread (including nested ones) that are currently loaded
+        const currentReplyCount = getAllRepliesInThread(commentId).length;
 
         const res = await fetch(
           `/api/features/${featureId}/comments/${commentId}/replies?email=${encodeURIComponent(email)}&name=${encodeURIComponent(
@@ -274,7 +338,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         setLoadingMoreReplies(null);
       }
     },
-    [featureId, email, name, activities]
+    [featureId, email, name, activities, getAllRepliesInThread]
   );
 
   // Expose the addCommentLocally function to parent component
@@ -647,6 +711,92 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
     }
   };
 
+  // Handle comment deletion
+  const handleDeleteComment = async (commentId: string) => {
+    setLoadingCommentId(commentId);
+    try {
+      const res = await fetch(`/api/features/${featureId}/comments/${commentId}?email=${encodeURIComponent(email)}`, {
+        method: "DELETE",
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      // Update the UI to mark comment as deleted
+      setActivities((prev) => prev.map((activity) => (activity.id === commentId ? { ...activity, is_deleted: true, content: "" } : activity)));
+
+      setOpenDropdownId(null); // Close dropdown
+
+      // Remove the comment from UI after 2 seconds
+      setTimeout(() => {
+        setActivities((prev) => prev.filter((activity) => activity.id !== commentId));
+      }, 2000);
+    } catch (error) {
+      console.error("Error deleting comment:", error);
+      // TODO: Add error handling UI (toast/alert)
+    } finally {
+      setLoadingCommentId(null);
+    }
+  };
+
+  // Handle starting comment edit
+  const handleStartEdit = (commentId: string, currentContent: string) => {
+    setEditingCommentId(commentId);
+    setEditingContent(currentContent);
+    setOpenDropdownId(null); // Close dropdown
+  };
+
+  // Handle canceling comment edit
+  const handleCancelEdit = () => {
+    setEditingCommentId(null);
+    setEditingContent("");
+  };
+
+  // Handle saving comment edit
+  const handleSaveEdit = async (commentId: string) => {
+    if (!editingContent.trim()) return;
+
+    setLoadingCommentId(commentId);
+    try {
+      const res = await fetch(`/api/features/${featureId}/comments/${commentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          content: editingContent.trim(),
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      const data = await res.json();
+
+      // Update the UI with the edited comment
+      setActivities((prev) =>
+        prev.map((activity) =>
+          activity.id === commentId
+            ? {
+                ...activity,
+                content: data.comment.content,
+                edited_at: data.comment.edited_at,
+              }
+            : activity
+        )
+      );
+
+      setEditingCommentId(null);
+      setEditingContent("");
+    } catch (error) {
+      console.error("Error editing comment:", error);
+      // TODO: Add error handling UI (toast/alert)
+    } finally {
+      setLoadingCommentId(null);
+    }
+  };
+
   // Retry function for error handling
   const retryFetch = async () => {
     setIsLoading(true);
@@ -658,6 +808,370 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Function to render comments in flat structure with reply indicators
+  const renderComments = (comments: Activity[], depth: number): React.ReactNode => {
+    if (depth > 0) {
+      // For nested calls, render all replies flat under the main comment
+      return comments.map((comment, index) => {
+        const isLastComment = index === comments.length - 1;
+
+        // Find who this reply is replying to
+        const replyTarget = comment.parent_comment_id ? activities.find((activity) => activity.id === comment.parent_comment_id) : null;
+
+        return (
+          <div key={comment.id} className="ml-11">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0">{getUserAvatar(comment.author_name, comment.author_image_url)}</div>
+
+              <div className="flex-1 min-w-0">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-semibold text-gray-900 text-sm capitalize">{comment.author_name}</span>
+
+                      {comment.type === "status_change" && (
+                        <div className="text-xs text-gray-500">
+                          marked this post as{" "}
+                          <Badge variant="secondary" className="text-xs">
+                            {STATUS_TEXT[comment.new_status || ""] || "Unknown"}
+                          </Badge>
+                        </div>
+                      )}
+                      {comment.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
+                    </div>
+
+                    {comment.is_deleted ? (
+                      <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
+                    ) : (
+                      comment.content && (
+                        <div className="text-sm text-gray-700 mt-1 leading-relaxed">
+                          {replyTarget && (
+                            <span className="font-semibold text-gray-[#202020] rounded-xs bg-primary/20 px-1 py-[0.1rem] mr-1">
+                              {replyTarget.author_name.charAt(0).toUpperCase() + replyTarget.author_name.slice(1)}
+                            </span>
+                          )}
+                          {editingCommentId === comment.id ? (
+                            <div className="space-y-2">
+                              <Textarea
+                                value={editingContent}
+                                onChange={(e) => setEditingContent(e.target.value)}
+                                className="min-h-[60px] text-sm"
+                                placeholder="Edit your comment..."
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                                    e.preventDefault();
+                                    handleSaveEdit(comment.id);
+                                  } else if (e.key === "Escape") {
+                                    handleCancelEdit();
+                                  }
+                                }}
+                              />
+                              <div className="flex items-center gap-2">
+                                <Button size="sm" onClick={() => handleSaveEdit(comment.id)} className="h-7 text-xs">
+                                  Save
+                                </Button>
+                                <Button variant="ghost" size="sm" onClick={handleCancelEdit} className="h-7 text-xs">
+                                  Cancel
+                                </Button>
+                                <span className="hidden md:inline text-xs text-gray-400 ml-2">Ctrl+Enter to save, Esc to cancel</span>
+                              </div>
+                            </div>
+                          ) : (
+                            comment.content
+                          )}
+                        </div>
+                      )
+                    )}
+                  </div>
+
+                  {comment.author_email === email && (
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {loadingCommentId === comment.id ? (
+                        <LoadingSpinner size="xs" className="text-gray-500" />
+                      ) : (
+                        <DropdownMenu open={openDropdownId === comment.id} onOpenChange={(open) => setOpenDropdownId(open ? comment.id : null)}>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="sm" className="w-6 h-6 p-0">
+                              <MoreHorizontal className="w-3 h-3" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-48">
+                            <DropdownMenuItem onClick={() => handleStartEdit(comment.id, comment.content || "")} className="flex items-center gap-2">
+                              <Edit className="w-4 h-4" />
+                              <span>Edit</span>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => handleDeleteComment(comment.id)}
+                              className="flex items-center gap-2 text-red-600 hover:text-red-700"
+                            >
+                              <Trash2 className="w-4 h-4 text-red-600 hover:text-red-700" />
+                              <span className="text-red-600 hover:text-red-700">Delete</span>
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 mt-3">
+                  {comment.type === "comment" && !comment.is_deleted && (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-xs text-gray-500 h-6 !px-0 hover:bg-transparent hover:text-primary"
+                        onClick={() => handleToggleLike(comment.id)}
+                      >
+                        {comment.user_has_liked ? (
+                          <HeartFillIcon className="w-2.5 h-2.5 mr-1 text-primary" />
+                        ) : (
+                          <HeartIcon className="w-2.5 h-2.5 mr-1" />
+                        )}
+                        <span className={(comment.likes_count || 0) > 0 ? "inline-block animate-[slideInRight_0.3s_ease-out]" : ""}>
+                          {(comment.likes_count || 0) > 0 && ((comment.likes_count || 0) === 1 ? "1 like" : `${comment.likes_count || 0} likes`)}
+                        </span>
+                      </Button>
+                      <span className="text-xs text-gray-400">•</span>
+                    </>
+                  )}
+                  <span className="text-xs text-gray-500">{formatTimeAgo(comment.created_at)}</span>
+                  {comment.type === "comment" && !comment.is_deleted && (
+                    <>
+                      <span className="text-xs text-gray-400">•</span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-xs text-gray-500 h-6 px-2"
+                        onClick={() => setReplyingTo(comment.id === replyingTo ? null : comment.id)}
+                      >
+                        {replyingTo === comment.id ? "Cancel" : "Reply"}
+                      </Button>
+                    </>
+                  )}
+                  {comment.edited_at && (
+                    <>
+                      <span className="text-xs text-gray-400">•</span>
+                      <span className="text-xs text-gray-400">edited</span>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Reply form for this reply */}
+            {replyingTo === comment.id && (
+              <div className="mt-3 ml-11">
+                <CommentForm
+                  featureId={featureId}
+                  email={email}
+                  name={name}
+                  parentCommentId={comment.id}
+                  placeholder={`Reply to ${comment.author_name}...`}
+                  onCommentAdded={handleReplyAdded}
+                  isFocused={true}
+                  isReply={true}
+                />
+              </div>
+            )}
+          </div>
+        );
+      });
+    }
+
+    // For top-level comments (depth === 0)
+    return comments.map((comment, index) => {
+      // Get ALL replies for this main comment thread
+      const allReplies = getAllRepliesInThread(comment.id);
+      const isLastComment = index === comments.length - 1;
+
+      return (
+        <div key={comment.id} className={`pb-4 ${!isLastComment ? "border-b border-gray-100" : ""}`}>
+          {/* Main Comment */}
+          <div className="flex items-start gap-3">
+            <div className="flex-shrink-0">{getUserAvatar(comment.author_name, comment.author_image_url)}</div>
+
+            <div className="flex-1 min-w-0">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="font-semibold text-gray-900 text-sm capitalize">{comment.author_name}</span>
+                    {comment.type === "status_change" && (
+                      <div className="text-xs text-gray-500">
+                        marked this post as{" "}
+                        <Badge variant="secondary" className="text-xs">
+                          {STATUS_TEXT[comment.new_status || ""] || "Unknown"}
+                        </Badge>
+                      </div>
+                    )}
+                    {comment.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
+                  </div>
+
+                  {comment.is_deleted ? (
+                    <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
+                  ) : (
+                    comment.content && (
+                      <div className="text-sm text-gray-700 mt-1 leading-relaxed">
+                        {editingCommentId === comment.id ? (
+                          <div className="space-y-2">
+                            <Textarea
+                              value={editingContent}
+                              onChange={(e) => setEditingContent(e.target.value)}
+                              className="min-h-[60px] text-sm"
+                              placeholder="Edit your comment..."
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                                  e.preventDefault();
+                                  handleSaveEdit(comment.id);
+                                } else if (e.key === "Escape") {
+                                  handleCancelEdit();
+                                }
+                              }}
+                            />
+                            <div className="flex items-center gap-2">
+                              <Button size="lg" onClick={() => handleSaveEdit(comment.id)} className="h-8 text-xs text-white">
+                                Save
+                              </Button>
+                              <Button variant="ghost" size="sm" onClick={handleCancelEdit} className="h-8 text-xs">
+                                Cancel
+                              </Button>
+                              <span className="hidden md:inline text-xs text-gray-400 ml-2">Ctrl+Enter to save, Esc to cancel</span>
+                            </div>
+                          </div>
+                        ) : (
+                          comment.content
+                        )}
+                      </div>
+                    )
+                  )}
+                </div>
+
+                {comment.author_email === email && (
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {loadingCommentId === comment.id ? (
+                      <LoadingSpinner size="xs" className="text-gray-500" />
+                    ) : (
+                      <DropdownMenu open={openDropdownId === comment.id} onOpenChange={(open) => setOpenDropdownId(open ? comment.id : null)}>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="sm" className="w-6 h-6 p-0">
+                            <MoreHorizontal className="w-3 h-3" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-48">
+                          <DropdownMenuItem onClick={() => handleStartEdit(comment.id, comment.content || "")} className="flex items-center gap-2">
+                            <Edit className="w-4 h-4" />
+                            <span>Edit</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() => handleDeleteComment(comment.id)}
+                            className="flex items-center gap-2 text-red-600 hover:text-red-700"
+                          >
+                            <Trash2 className="w-4 h-4 text-red-600 hover:text-red-700" />
+                            <span className="text-red-600 hover:text-red-700">Delete</span>
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 mt-3">
+                {comment.type === "comment" && !comment.is_deleted && (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-gray-500 h-6 !px-0 hover:bg-transparent hover:text-primary"
+                      onClick={() => handleToggleLike(comment.id)}
+                    >
+                      {comment.user_has_liked ? (
+                        <HeartFillIcon className="w-2.5 h-2.5 mr-1 text-primary" />
+                      ) : (
+                        <HeartIcon className="w-2.5 h-2.5 mr-1" />
+                      )}
+                      <span className={(comment.likes_count || 0) > 0 ? "inline-block animate-[slideInRight_0.3s_ease-out]" : ""}>
+                        {(comment.likes_count || 0) > 0 && ((comment.likes_count || 0) === 1 ? "1 like" : `${comment.likes_count || 0} likes`)}
+                      </span>
+                    </Button>
+                    <span className="text-xs text-gray-400">•</span>
+                  </>
+                )}
+                <span className="text-xs text-gray-500">{formatTimeAgo(comment.created_at)}</span>
+                {comment.type === "comment" && !comment.is_deleted && (
+                  <>
+                    <span className="text-xs text-gray-400">•</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-gray-500 h-6 px-2"
+                      onClick={() => setReplyingTo(comment.id === replyingTo ? null : comment.id)}
+                    >
+                      {replyingTo === comment.id ? "Cancel" : "Reply"}
+                    </Button>
+                  </>
+                )}
+
+                {comment.edited_at && (
+                  <>
+                    <span className="text-xs text-gray-400">•</span>
+                    <span className="text-xs text-gray-400">edited</span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Reply form for this comment */}
+          {replyingTo === comment.id && (
+            <div className="mt-3 ml-11">
+              <CommentForm
+                featureId={featureId}
+                email={email}
+                name={name}
+                parentCommentId={comment.id}
+                placeholder={`Reply to ${comment.author_name}...`}
+                onCommentAdded={handleReplyAdded}
+                isFocused={true}
+                isReply={true}
+              />
+            </div>
+          )}
+
+          {/* Flat Replies - render all replies for this main comment */}
+          {allReplies.length > 0 && <div className="mt-3 space-y-3">{renderComments(allReplies, 1)}</div>}
+
+          {/* Load more replies button */}
+          {comment.replies_has_more && (
+            <div className="mt-2 ml-11">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => handleLoadMoreReplies(comment.id)}
+                disabled={loadingMoreReplies === comment.id}
+                className="text-xs text-gray-500 hover:text-blue-600 h-6"
+              >
+                {loadingMoreReplies === comment.id ? (
+                  <>
+                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                    Loading...
+                  </>
+                ) : (
+                  (() => {
+                    const remainingReplies = comment.replies_total_count! - allReplies.length;
+                    return remainingReplies > 10
+                      ? "View 10 more replies"
+                      : `View ${remainingReplies} more ${remainingReplies === 1 ? "reply" : "replies"}`;
+                  })()
+                )}
+              </Button>
+            </div>
+          )}
+        </div>
+      );
+    });
   };
 
   if (isLoading) {
@@ -749,220 +1263,10 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         </CardHeader>
 
         <CardContent className="space-y-4">
-          {activities
-            .filter((activity) => !activity.parent_comment_id) // Only render main comments first
-            .map((mainComment, mainIndex) => {
-              // Get all replies for this main comment
-              const replies = activities.filter((activity) => activity.parent_comment_id === mainComment.id);
-              const isLastMainComment = mainIndex === activities.filter((a) => !a.parent_comment_id).length - 1;
-
-              return (
-                <div key={mainComment.id} className={`pb-4 ${!isLastMainComment ? "border-b border-gray-100" : ""}`}>
-                  {/* Main Comment */}
-                  <div className="flex items-start gap-3">
-                    <div className="flex-shrink-0">{getUserAvatar(mainComment.author_name, mainComment.author_image_url)}</div>
-
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="font-semibold text-gray-900 text-sm capitalize">{mainComment.author_name}</span>
-                            {mainComment.type === "status_change" && (
-                              <div className="text-xs text-gray-500">
-                                marked this post as{" "}
-                                <Badge variant="secondary" className="text-xs">
-                                  {STATUS_TEXT[mainComment.new_status || ""] || "Unknown"}
-                                </Badge>
-                              </div>
-                            )}
-                            {mainComment.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
-                          </div>
-
-                          {mainComment.is_deleted ? (
-                            <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
-                          ) : (
-                            mainComment.content && <div className="text-sm text-gray-700 mt-1 leading-relaxed">{mainComment.content}</div>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <Button variant="ghost" size="sm" className="w-6 h-6 p-0">
-                            <MoreHorizontal className="w-3 h-3" />
-                          </Button>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2 mt-3">
-                        {mainComment.type === "comment" && !mainComment.is_deleted && (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-xs text-gray-500 h-6 !px-0 hover:bg-transparent hover:text-primary"
-                              onClick={() => handleToggleLike(mainComment.id)}
-                            >
-                              {mainComment.user_has_liked ? (
-                                <HeartFillIcon className="w-2.5 h-2.5 mr-1 text-primary" />
-                              ) : (
-                                <HeartIcon className="w-2.5 h-2.5 mr-1" />
-                              )}
-                              <span className={(mainComment.likes_count || 0) > 0 ? "inline-block animate-[slideInRight_0.3s_ease-out]" : ""}>
-                                {(mainComment.likes_count || 0) > 0 &&
-                                  ((mainComment.likes_count || 0) === 1 ? "1 like" : `${mainComment.likes_count || 0} likes`)}
-                              </span>
-                            </Button>
-                            <span className="text-xs text-gray-400">•</span>
-                          </>
-                        )}
-                        <span className="text-xs text-gray-500">{formatTimeAgo(mainComment.created_at)}</span>
-                        {mainComment.type === "comment" && !mainComment.is_deleted && (
-                          <>
-                            <span className="text-xs text-gray-400">•</span>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-xs text-gray-500 h-6 px-2"
-                              onClick={() => setReplyingTo(mainComment.id === replyingTo ? null : mainComment.id)}
-                            >
-                              {replyingTo === mainComment.id ? "Cancel" : "Reply"}
-                            </Button>
-                          </>
-                        )}
-
-                        {mainComment.edited_at && (
-                          <>
-                            <span className="text-xs text-gray-400">•</span>
-                            <span className="text-xs text-gray-400">edited</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Reply form for this comment */}
-                  {replyingTo === mainComment.id && (
-                    <div className="mt-3 ml-11">
-                      <CommentForm
-                        featureId={featureId}
-                        email={email}
-                        name={name}
-                        parentCommentId={mainComment.id}
-                        placeholder={`Reply to ${mainComment.author_name}...`}
-                        onCommentAdded={handleReplyAdded}
-                        isFocused={true}
-                        isReply={true}
-                      />
-                    </div>
-                  )}
-
-                  {/* Replies */}
-                  {replies.length > 0 && (
-                    <div className="mt-3 space-y-3">
-                      {replies.map((reply, replyIndex) => {
-                        const isLastReply = replyIndex === replies.length - 1;
-
-                        return (
-                          <div key={reply.id} className="ml-11">
-                            <div className="flex items-start gap-3">
-                              <div className="flex-shrink-0">{getUserAvatar(reply.author_name, reply.author_image_url)}</div>
-
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-start justify-between gap-2">
-                                  <div className="flex-1">
-                                    <div className="flex items-center gap-2 mb-1">
-                                      <span className="font-semibold text-gray-900 text-sm capitalize">{reply.author_name}</span>
-                                      {reply.type === "status_change" && (
-                                        <div className="text-xs text-gray-500">
-                                          marked this post as{" "}
-                                          <Badge variant="secondary" className="text-xs">
-                                            {STATUS_TEXT[reply.new_status || ""] || "Unknown"}
-                                          </Badge>
-                                        </div>
-                                      )}
-                                      {reply.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
-                                    </div>
-
-                                    {reply.is_deleted ? (
-                                      <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
-                                    ) : (
-                                      reply.content && <div className="text-sm text-gray-700 mt-1 leading-relaxed">{reply.content}</div>
-                                    )}
-                                  </div>
-
-                                  <div className="flex items-center gap-2 flex-shrink-0">
-                                    <Button variant="ghost" size="sm" className="w-6 h-6 p-0">
-                                      <MoreHorizontal className="w-3 h-3" />
-                                    </Button>
-                                  </div>
-                                </div>
-
-                                <div className="flex items-center gap-2 mt-3">
-                                  {reply.type === "comment" && !reply.is_deleted && (
-                                    <>
-                                      <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="text-xs text-gray-500 h-6 !px-0 hover:bg-transparent hover:text-primary"
-                                        onClick={() => handleToggleLike(reply.id)}
-                                      >
-                                        {reply.user_has_liked ? (
-                                          <HeartFillIcon className="w-2.5 h-2.5 mr-1 text-primary" />
-                                        ) : (
-                                          <HeartIcon className="w-2.5 h-2.5 mr-1" />
-                                        )}
-                                        <span className={(reply.likes_count || 0) > 0 ? "inline-block animate-[slideInRight_0.3s_ease-out]" : ""}>
-                                          {(reply.likes_count || 0) > 0 &&
-                                            ((reply.likes_count || 0) === 1 ? "1 like" : `${reply.likes_count || 0} likes`)}
-                                        </span>
-                                      </Button>
-                                      <span className="text-xs text-gray-400">•</span>
-                                    </>
-                                  )}
-                                  <span className="text-xs text-gray-500">{formatTimeAgo(reply.created_at)}</span>
-                                  {reply.edited_at && (
-                                    <>
-                                      <span className="text-xs text-gray-400">•</span>
-                                      <span className="text-xs text-gray-400">edited</span>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* View more replies button for the last reply */}
-                            {isLastReply && mainComment.replies_has_more && (
-                              <div className="mt-2">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => handleLoadMoreReplies(mainComment.id)}
-                                  disabled={loadingMoreReplies === mainComment.id}
-                                  className="text-xs text-gray-500 hover:text-blue-600 h-6"
-                                >
-                                  {loadingMoreReplies === mainComment.id ? (
-                                    <>
-                                      <LoadingSpinner size="xs" className="mr-1" />
-                                      Loading...
-                                    </>
-                                  ) : (
-                                    (() => {
-                                      const remainingReplies = mainComment.replies_total_count! - replies.length;
-                                      return remainingReplies > 10
-                                        ? "View 10 more replies"
-                                        : `View ${remainingReplies} more ${remainingReplies === 1 ? "reply" : "replies"}`;
-                                    })()
-                                  )}
-                                </Button>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+          {renderComments(
+            activities.filter((activity) => !activity.parent_comment_id),
+            0
+          )}
 
           {/* Sentinel for infinite scroll */}
           <div ref={sentinelRef} />

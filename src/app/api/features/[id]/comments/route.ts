@@ -130,7 +130,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         return NextResponse.json({ error: "Parent comment not found" }, { status: 404 });
       }
       if (error.message.includes("only one level of replies")) {
-        return NextResponse.json({ error: "Only one level of replies is allowed" }, { status: 400 });
+        return NextResponse.json({ error: "Reply nesting limit exceeded" }, { status: 400 });
       }
       if (error.message.includes("different feature")) {
         return NextResponse.json({ error: "Parent comment belongs to a different feature" }, { status: 400 });

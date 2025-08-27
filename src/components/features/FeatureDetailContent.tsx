@@ -5,7 +5,21 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { ArrowLeft, ChevronUp, AlertCircle } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { ArrowLeft, ChevronUp, AlertCircle, MoreHorizontal, Edit, Trash2, Loader2 } from "lucide-react";
 import type { Feature } from "@/types";
 import StatusBadge from "./StatusBadge";
 import { formatNumber } from "@/lib/utils/numbers";
@@ -28,6 +42,14 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
   const [initialComments, setInitialComments] = useState<any[] | null>(null);
   const [commentsMetadata, setCommentsMetadata] = useState<{ total: number; hasMore: boolean } | null>(null);
   const [addCommentToFeed, setAddCommentToFeed] = useState<((comment: any) => void) | null>(null);
+
+  // Feature editing state
+  const [isEditingFeature, setIsEditingFeature] = useState(false);
+  const [editedTitle, setEditedTitle] = useState("");
+  const [editedDescription, setEditedDescription] = useState("");
+  const [isUpdatingFeature, setIsUpdatingFeature] = useState(false);
+  const [isDeletingFeature, setIsDeletingFeature] = useState(false);
+  const [featureDropdownOpen, setFeatureDropdownOpen] = useState(false);
 
   // Handle escape key to close comment form
   useEffect(() => {
@@ -164,6 +186,98 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
     router.push(`/features?${currentParams.toString()}`);
   };
 
+  // Check if current user is the author of the feature
+  const isFeatureAuthor = feature && feature.author_email === email;
+
+  // Handle starting feature edit
+  const handleStartEditFeature = () => {
+    if (!feature) return;
+    setEditedTitle(feature.title);
+    setEditedDescription(feature.description);
+    setIsEditingFeature(true);
+    setFeatureDropdownOpen(false);
+  };
+
+  // Handle canceling feature edit
+  const handleCancelEditFeature = () => {
+    setIsEditingFeature(false);
+    setEditedTitle("");
+    setEditedDescription("");
+  };
+
+  // Handle saving feature edit
+  const handleSaveEditFeature = async () => {
+    if (!feature || !editedTitle.trim() || !editedDescription.trim()) return;
+
+    setIsUpdatingFeature(true);
+    try {
+      const res = await fetch(`/api/features/${featureId}/author-edit`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          name,
+          title: editedTitle.trim(),
+          description: editedDescription.trim(),
+        }),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ error: "Failed to update feature" }));
+        throw new Error(errorData.error || "Failed to update feature");
+      }
+
+      const data = await res.json();
+
+      // Update the feature in state
+      setFeature((prev) =>
+        prev
+          ? {
+              ...prev,
+              title: data.feature.title,
+              description: data.feature.description,
+            }
+          : null
+      );
+
+      setIsEditingFeature(false);
+      setEditedTitle("");
+      setEditedDescription("");
+    } catch (error) {
+      console.error("Error updating feature:", error);
+      // TODO: Add error handling UI (toast/alert)
+    } finally {
+      setIsUpdatingFeature(false);
+    }
+  };
+
+  // Handle deleting feature
+  const handleDeleteFeature = async () => {
+    if (!feature) return;
+
+    setIsDeletingFeature(true);
+    try {
+      const res = await fetch(`/api/features/${featureId}/author-delete`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, name }),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ error: "Failed to delete feature" }));
+        throw new Error(errorData.error || "Failed to delete feature");
+      }
+
+      // Navigate back to features list after successful deletion
+      handleBack();
+    } catch (error) {
+      console.error("Error deleting feature:", error);
+      // TODO: Add error handling UI (toast/alert)
+    } finally {
+      setIsDeletingFeature(false);
+    }
+  };
+
   const getUserAvatar = (authorName: string, imageUrl?: string) => {
     if (imageUrl) {
       return <img src={imageUrl} alt={authorName} className="w-8 h-8 rounded-full object-cover flex-shrink-0" />;
@@ -293,7 +407,83 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
                   </div>
 
                   <div className="flex-1">
-                    <h1 className="text-lg font-semibold text-gray-900 leading-tight mb-2">{feature.title}</h1>
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <div className="flex-1">
+                        {isEditingFeature ? (
+                          <Input
+                            value={editedTitle}
+                            onChange={(e) => setEditedTitle(e.target.value)}
+                            className="text-lg font-semibold mb-2"
+                            placeholder="Feature title..."
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                                e.preventDefault();
+                                handleSaveEditFeature();
+                              } else if (e.key === "Escape") {
+                                handleCancelEditFeature();
+                              }
+                            }}
+                          />
+                        ) : (
+                          <h1 className="text-lg font-semibold text-gray-900 leading-tight">{feature.title}</h1>
+                        )}
+                      </div>
+
+                      {isFeatureAuthor && (
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          {isUpdatingFeature || isDeletingFeature ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
+                          ) : (
+                            <DropdownMenu open={featureDropdownOpen} onOpenChange={setFeatureDropdownOpen}>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="sm" className="w-6 h-6 p-0">
+                                  <MoreHorizontal className="w-3 h-3" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-48">
+                                <DropdownMenuItem onClick={handleStartEditFeature} className="flex items-center gap-2">
+                                  <Edit className="w-4 h-4" />
+                                  <span>Edit</span>
+                                </DropdownMenuItem>
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <DropdownMenuItem
+                                      onSelect={(e) => e.preventDefault()}
+                                      className="flex items-center gap-2 text-red-600 hover:text-red-700"
+                                    >
+                                      <Trash2 className="w-4 h-4 text-red-600 hover:text-red-700" />
+                                      <span className="text-red-600 hover:text-red-700">Delete</span>
+                                    </DropdownMenuItem>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                      <AlertDialogTitle>Delete Feature Request</AlertDialogTitle>
+                                      <AlertDialogDescription>
+                                        Are you sure you want to delete this feature request? This action cannot be undone and will also delete all
+                                        associated comments.
+                                      </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                      <AlertDialogAction onClick={handleDeleteFeature} className="bg-red-600 hover:bg-red-700">
+                                        {isDeletingFeature ? (
+                                          <>
+                                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                            Deleting...
+                                          </>
+                                        ) : (
+                                          "Delete"
+                                        )}
+                                      </AlertDialogAction>
+                                    </AlertDialogFooter>
+                                  </AlertDialogContent>
+                                </AlertDialog>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                        </div>
+                      )}
+                    </div>
                     <StatusBadge status={feature.status} />
                   </div>
                 </div>
@@ -315,32 +505,61 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
 
                 {/* Description */}
                 <div className="prose prose-sm max-w-none mb-4">
-                  <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">{feature.description}</p>
+                  {isEditingFeature ? (
+                    <div className="space-y-2">
+                      <Textarea
+                        value={editedDescription}
+                        onChange={(e) => setEditedDescription(e.target.value)}
+                        className="min-h-[100px] leading-relaxed whitespace-pre-wrap"
+                        placeholder="Feature description..."
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button size="lg" onClick={handleSaveEditFeature} disabled={isUpdatingFeature} className="h-8 text-xs text-white">
+                          {isUpdatingFeature ? (
+                            <>
+                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                              Saving...
+                            </>
+                          ) : (
+                            "Save"
+                          )}
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={handleCancelEditFeature} disabled={isUpdatingFeature} className="h-8 text-xs">
+                          Cancel
+                        </Button>
+                        <span className="hidden md:inline text-xs text-gray-400 ml-2">Ctrl+Enter to save, Esc to cancel</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">{feature.description}</p>
+                  )}
                 </div>
 
-                {/* Inline Comment Input */}
-                <div className="border-t border-gray-100 pt-4">
-                  <CommentForm
-                    featureId={featureId}
-                    email={email}
-                    name={name}
-                    onCommentAdded={(newComment) => {
-                      // Add comment locally to the activity feed
-                      if (addCommentToFeed) {
-                        addCommentToFeed(newComment);
-                      }
-                    }}
-                    placeholder="Leave a comment..."
-                    onFocus={() => setIsCommentFocused(true)}
-                    onBlur={() => {
-                      // Delay to allow for button clicks
-                      setTimeout(() => {
-                        setIsCommentFocused(false);
-                      }, 150);
-                    }}
-                    isFocused={isCommentFocused}
-                  />
-                </div>
+                {/* Inline Comment Input - Hidden during feature editing */}
+                {!isEditingFeature && (
+                  <div className="border-t border-gray-100 pt-4">
+                    <CommentForm
+                      featureId={featureId}
+                      email={email}
+                      name={name}
+                      onCommentAdded={(newComment) => {
+                        // Add comment locally to the activity feed
+                        if (addCommentToFeed) {
+                          addCommentToFeed(newComment);
+                        }
+                      }}
+                      placeholder="Leave a comment..."
+                      onFocus={() => setIsCommentFocused(true)}
+                      onBlur={() => {
+                        // Delay to allow for button clicks
+                        setTimeout(() => {
+                          setIsCommentFocused(false);
+                        }, 150);
+                      }}
+                      isFocused={isCommentFocused}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           </CardContent>
