@@ -1,6 +1,6 @@
 "use client";
 
-import { BadgeCheck, Bell, Check, ChevronDown, CircleCheck, CircleStar, Megaphone, MessageCircle, Plus, Search, Trash2, X } from "lucide-react";
+import { Bell, ChevronDown, CircleCheck, Heart, Megaphone, MessageCircle, Plus, Reply, Search, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,26 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { type Notification, NotificationService } from "@/lib/services/notifications";
 import type { FeatureFilter, FeatureSort } from "@/types";
+import { useRouter } from "next/navigation";
 
 // Utility function to highlight search terms in text
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Utility function to render bold text from ** markers
+const renderBoldText = (text: string): React.ReactNode => {
+  const parts = text.split(/(\*\*.*?\*\*)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      const boldText = part.slice(2, -2);
+      return (
+        <span key={index} className="font-medium text-gray-800">
+          {boldText}
+        </span>
+      );
+    }
+    return part;
+  });
+};
 
 const highlightSearchText = (text: string, query: string): React.ReactNode => {
   const q = query.trim();
@@ -80,6 +97,10 @@ const getNotificationIcon = (type: Notification["type"]) => {
       return <Trash2 className=" text-red-500 !w-5 !h-5" strokeWidth={2} />;
     case "vote":
       return <CircleCheck className=" text-[#0d9488] !w-5 !h-5" strokeWidth={2} />;
+    case "comment_like":
+      return <Heart className=" text-red-500 !w-5 !h-5" strokeWidth={2} />;
+    case "reply":
+      return <Reply className=" text-green-500 !w-5 !h-5" strokeWidth={2} />;
     default:
       return <Bell className=" text-gray-500 !w-5 !h-5" strokeWidth={2} />;
   }
@@ -96,7 +117,9 @@ export default function TopBar(props: {
   isRefetching?: boolean;
   email?: string;
   name?: string;
+  appSlug?: string;
 }) {
+  const router = useRouter();
   const [search, setSearch] = useState(props.q);
   const [isSearching, setIsSearching] = useState(!!props.q && props.q.trim() !== "");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -104,6 +127,15 @@ export default function TopBar(props: {
   const [isLoadingNotifications, setIsLoadingNotifications] = useState(true);
   const [_currentUser, setCurrentUser] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  function orderNotifications(list: Notification[]): Notification[] {
+    return [...list].sort((a, b) => {
+      if (a.read !== b.read) return a.read ? 1 : -1; // unread first
+      const at = new Date(a.updated_at).getTime();
+      const bt = new Date(b.updated_at).getTime();
+      return bt - at; // newest updated first within group
+    });
+  }
 
   // keep local value in sync if parent changes q while not actively typing
   useEffect(() => {
@@ -143,6 +175,27 @@ export default function TopBar(props: {
     setTimeout(() => inputRef.current?.focus(), 0);
   }
 
+  // Handle notification click behavior
+  function onNotificationClick(notification: Notification) {
+    setNotificationsOpen(false);
+
+    // Mark as read in background without blocking navigation
+    markAsRead(notification.id).catch((err) => {
+      console.error("Error marking notification as read:", err);
+    });
+
+    if (notification.type === "feature_deleted") return;
+
+    if (notification.feature_id) {
+      const params = new URLSearchParams();
+      if (props.email) params.set("email", props.email);
+      if (props.name) params.set("name", props.name);
+      if (notification.app_slug) params.set("app_slug", notification.app_slug);
+      const qp = params.toString() ? `?${params.toString()}` : "";
+      router.push(`/features/${notification.feature_id}${qp}`);
+    }
+  }
+
   function closeSearch() {
     setIsSearching(false);
     setSearch("");
@@ -161,7 +214,7 @@ export default function TopBar(props: {
   async function loadNotifications(email: string, name: string) {
     try {
       setIsLoadingNotifications(true);
-      const data = await NotificationService.getNotifications(email, name);
+      const data = await NotificationService.getNotifications(email, name, 50, props.appSlug);
       setNotifications(data);
     } catch (error) {
       console.error("Error loading notifications:", error);
@@ -175,15 +228,16 @@ export default function TopBar(props: {
     if (!props.email || !props.name) return;
 
     try {
-      // Update local state immediately for better UX
-      setNotifications((prev) => prev.map((n) => (n.id === notificationId ? { ...n, read: true } : n)));
+      // Update local state immediately for better UX and bump updated_at so it rises to top of "Earlier"
+      const nowIso = new Date().toISOString();
+      setNotifications((prev) => orderNotifications(prev.map((n) => (n.id === notificationId ? { ...n, read: true, updated_at: nowIso } : n))));
 
       // Update in database
       await NotificationService.markAsRead(notificationId, props.email, props.name);
     } catch (error) {
       console.error("Error marking notification as read:", error);
       // Revert local state on error - but don't reload all notifications to avoid infinite loops
-      setNotifications((prev) => prev.map((n) => (n.id === notificationId ? { ...n, read: false } : n)));
+      setNotifications((prev) => orderNotifications(prev.map((n) => (n.id === notificationId ? { ...n, read: false } : n))));
     }
   }
 
@@ -195,10 +249,10 @@ export default function TopBar(props: {
 
     try {
       // Update local state immediately
-      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      setNotifications((prev) => orderNotifications(prev.map((n) => ({ ...n, read: true }))));
 
       // Update in database
-      await NotificationService.markAllAsRead(props.email, props.name);
+      await NotificationService.markAllAsRead(props.email, props.name, props.appSlug);
     } catch (error) {
       console.error("Error marking all notifications as read:", error);
       // Revert local state on error - but don't reload all notifications to avoid infinite loops
@@ -369,39 +423,129 @@ export default function TopBar(props: {
                 </div>
               ) : (
                 <div className="max-h-80 overflow-y-auto">
-                  {notifications.map((notification, index) => (
-                    <div key={notification.id} className="group">
-                      <DropdownMenuItem
-                        className={`group/item p-3 cursor-pointer hover:bg-muted/50 ${!notification.read ? "bg-blue-50/50" : ""}`}
-                        onClick={() => markAsRead(notification.id)}
-                      >
-                        <div className="flex items-start gap-3 w-full">
-                          <div className="flex-shrink-0 mt-0.5">{getNotificationIcon(notification.type)}</div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="flex-1 min-w-0">
-                                <p className={`text-sm font-medium truncate  ${!notification.read ? "text-foreground" : "text-muted-foreground"}`}>
-                                  {notification.title}
-                                </p>
-                                <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                                  {`${notification.message.charAt(0).toUpperCase()}${notification.message.slice(1)} `}
-                                  {notification.feature_title ? <span className="font-medium">{notification.feature_title}</span> : ""}
-                                </p>
-                                <p className="text-xs text-muted-foreground mt-1">{formatTimestamp(notification.created_at)}</p>
+                  {(() => {
+                    const unreadNotifications = notifications.filter((n) => !n.read);
+                    const readNotifications = notifications.filter((n) => n.read);
+
+                    return (
+                      <>
+                        {/* Unread Notifications Section */}
+                        {unreadNotifications.length > 0 && (
+                          <>
+                            {/* Unread Header */}
+                            <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200/60 bg-slate-50/50">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Unread</span>
+                                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 text-xs font-bold text-white bg-blue-500 rounded-full">
+                                  {unreadNotifications.length}
+                                </span>
                               </div>
-                              {/* Auto-cleanup: Old notifications are automatically deleted after 30 days if read */}
                             </div>
-                          </div>
-                          {!notification.read && (
-                            <div className="flex-shrink-0">
-                              <div className="w-2 h-2 bg-blue-500 rounded-full" />
+
+                            {/* Unread Notifications */}
+                            <div className="space-y-0.5">
+                              {unreadNotifications.map((notification, index) => (
+                                <div key={notification.id} className="group">
+                                  <DropdownMenuItem
+                                    className="p-3 cursor-pointer hover:bg-blue-50/60 transition-all duration-200 mx-1 bg-gradient-to-r from-blue-50/60 to-blue-100/40"
+                                    onClick={() => onNotificationClick(notification)}
+                                  >
+                                    <div className="flex items-start gap-3 w-full">
+                                      <div className="flex-shrink-0 mt-0.5 relative">
+                                        {getNotificationIcon(notification.type)}
+                                        <div className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-blue-500 rounded-full border border-white shadow-sm" />
+                                      </div>
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-start justify-between gap-2">
+                                          <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-semibold text-foreground truncate leading-tight">{notification.title}</p>
+                                            <p className="text-xs text-muted-foreground mt-1 line-clamp-2 leading-relaxed">
+                                              {renderBoldText(`${notification.message.charAt(0).toUpperCase()}${notification.message.slice(1)} `)}
+                                              {notification.feature_title && notification.type !== "status_change" && (
+                                                <>
+                                                  {(notification.type === "reply" || notification.type === "comment_like") && "on "}
+                                                  <span className="font-medium text-foreground/80">{notification.feature_title}</span>
+                                                </>
+                                              )}
+                                            </p>
+                                            <p className="text-xs text-muted-foreground/70 mt-1.5 font-normal">
+                                              {formatTimestamp(notification.updated_at)}
+                                            </p>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </DropdownMenuItem>
+                                  {index < unreadNotifications.length - 1 && (
+                                    <div className="px-2 py-0.5">
+                                      <div className="h-px bg-gradient-to-r from-blue-100/40 via-blue-50/20 to-transparent" />
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
                             </div>
-                          )}
-                        </div>
-                      </DropdownMenuItem>
-                      {index < notifications.length - 1 && <Separator className="my-1" />}
-                    </div>
-                  ))}
+                          </>
+                        )}
+
+                        {/* Read Notifications Section */}
+                        {readNotifications.length > 0 && (
+                          <>
+                            {/* Earlier Header */}
+                            {unreadNotifications.length > 0 && (
+                              <div className="flex items-center justify-between px-3 mt-2 py-2 border-b border-slate-200/60 bg-slate-50/50">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Earlier</span>
+                                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 text-xs font-bold text-slate-600 bg-slate-200 rounded-full">
+                                    {readNotifications.length}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Read Notifications */}
+                            <div className="space-y-0.5">
+                              {readNotifications.map((notification, index) => (
+                                <div key={notification.id} className="group">
+                                  <DropdownMenuItem
+                                    className="p-3 cursor-pointer hover:bg-gray-50/50 transition-all duration-200 mx-1 opacity-90 hover:opacity-100"
+                                    onClick={() => onNotificationClick(notification)}
+                                  >
+                                    <div className="flex items-start gap-3 w-full">
+                                      <div className="flex-shrink-0 mt-0.5 opacity-70">{getNotificationIcon(notification.type)}</div>
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-start justify-between gap-2">
+                                          <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-medium text-muted-foreground truncate leading-tight">{notification.title}</p>
+                                            <p className="text-xs text-muted-foreground/70 mt-1 line-clamp-2 leading-relaxed">
+                                              {renderBoldText(`${notification.message.charAt(0).toUpperCase()}${notification.message.slice(1)} `)}
+                                              {notification.feature_title && notification.type !== "status_change" && (
+                                                <>
+                                                  {(notification.type === "reply" || notification.type === "comment_like") && "on "}
+                                                  <span className="font-medium text-muted-foreground/60">{notification.feature_title}</span>
+                                                </>
+                                              )}
+                                            </p>
+                                            <p className="text-xs text-muted-foreground/50 mt-1.5 font-normal">
+                                              {formatTimestamp(notification.updated_at)}
+                                            </p>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </DropdownMenuItem>
+                                  {index < readNotifications.length - 1 && (
+                                    <div className="px-2 py-0.5">
+                                      <div className="h-px bg-gradient-to-r from-gray-100/40 via-gray-50/20 to-transparent" />
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
             </DropdownMenuContent>

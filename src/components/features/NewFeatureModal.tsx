@@ -14,6 +14,7 @@ export default function NewFeatureModal({
   onClose,
   onCreated,
   imageUrl,
+  appSlug = "default", // Use 'default' app per new schema
 }: {
   email: string;
   name: string;
@@ -21,6 +22,7 @@ export default function NewFeatureModal({
   onClose: () => void;
   onCreated: () => void;
   imageUrl?: string;
+  appSlug?: string;
 }) {
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -58,6 +60,7 @@ export default function NewFeatureModal({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          app_slug: appSlug,
           title,
           description,
           email,
@@ -133,7 +136,7 @@ export default function NewFeatureModal({
             <Button type="submit" size={"lg"} className="text-white" disabled={submitting}>
               {loading ? (
                 <>
-                  <div className="h-4 w-4 animate-spin rounded-full border border-white border-t-transparent mr-2" />
+                  <div className="h-4 w-4 animate-spin rounded-full border border-white dark:border-gray-300 border-t-transparent mr-2" />
                   Submitting
                 </>
               ) : (

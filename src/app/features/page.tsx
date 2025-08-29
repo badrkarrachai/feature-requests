@@ -168,6 +168,8 @@ function FeaturesPageContent() {
 
   const email = params.get("email") || "";
   const name = params.get("name") || "";
+  const urlImage = params.get("url_image") || "";
+  const appSlug = params.get("app_slug") || "default"; // Use 'default' app per new schema
 
   // mutually-exclusive sort/filter from URL
   const initialFilter = parseFilter(params.get("filter"));
@@ -209,13 +211,15 @@ function FeaturesPageContent() {
   // Build query string (one of sort/filter)
   const baseQS = useMemo(() => {
     const u = new URLSearchParams();
+    u.set("app_slug", appSlug); // Always include app_slug
     if (email) u.set("email", email);
     if (name) u.set("name", name);
+    if (urlImage) u.set("url_image", urlImage);
     if (q) u.set("q", q);
     if (filter !== "all") u.set("filter", filter);
     else if (sort) u.set("sort", sort);
     return u.toString();
-  }, [email, name, q, sort, filter]);
+  }, [appSlug, email, name, urlImage, q, sort, filter]);
 
   // Keep URL synced
   useEffect(() => {
@@ -549,6 +553,7 @@ function FeaturesPageContent() {
         isRefetching={isSearching || (isLoadingMore && !isInitialLoading)}
         email={email}
         name={name}
+        appSlug={appSlug}
       />
 
       <div className="">
@@ -567,6 +572,7 @@ function FeaturesPageContent() {
                 pendingVotes={pendingVotes}
                 email={email}
                 name={name}
+                appSlug={appSlug}
               />
             </div>
 
@@ -586,6 +592,7 @@ function FeaturesPageContent() {
         onClose={() => setOpen(false)}
         name={name}
         imageUrl={undefined} // User profile image URL if available
+        appSlug={appSlug}
         onCreated={async () => {
           setOpen(false);
           // reload from first page to include the new item

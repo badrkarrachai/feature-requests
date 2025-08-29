@@ -87,7 +87,7 @@ export function AdminsManagement() {
       });
 
       if (createdAdmin) {
-        setAdmins((prev) => [createdAdmin, ...prev]);
+        setAdmins((prev) => [...prev, createdAdmin]);
         setShowAddAdmin(false);
         setNewAdmin({ name: "", email: "", password: "", showPassword: false });
         // Use toast for immediate feedback
@@ -275,37 +275,39 @@ export function AdminsManagement() {
                     <p className="text-xs text-muted-foreground mt-2">Added {new Date(admin.created_at).toLocaleDateString()}</p>
                   </div>
                   <div className="flex flex-col gap-2">
-                    <AlertDialog>
-                      <AlertDialogTrigger asChild>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-9 w-9 p-2 border-destructive/20 text-destructive hover:text-destructive hover:bg-destructive/10 hover:border-destructive/30 transition-colors"
-                          onClick={() => setAdminToDelete(admin)}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent className="bg-white dark:bg-[#121212]">
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>Remove Admin</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            Are you sure you want to remove admin privileges from <strong>{admin.name}</strong> ({admin.email})? This action will
-                            demote them to a regular user and they will lose access to all admin features.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={handleRemoveAdmin}
-                            disabled={isDeleting}
-                            className="bg-destructive text-white hover:bg-destructive/90"
+                    {admin.email !== "admin@admin.com" && (
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-9 w-9 p-2 border-destructive/20 text-destructive hover:text-destructive hover:bg-destructive/10 hover:border-destructive/30 transition-colors"
+                            onClick={() => setAdminToDelete(admin)}
                           >
-                            {isDeleting ? "Removing..." : "Remove Admin"}
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent className="bg-white dark:bg-[#121212]">
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Remove Admin</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              Are you sure you want to remove admin privileges from <strong>{admin.name}</strong> ({admin.email})? This action will
+                              demote them to a regular user and they will lose access to all admin features.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={handleRemoveAdmin}
+                              disabled={isDeleting}
+                              className="bg-destructive text-white hover:bg-destructive/90"
+                            >
+                              {isDeleting ? "Removing..." : "Remove Admin"}
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    )}
                   </div>
                 </div>
               </div>
