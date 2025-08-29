@@ -119,7 +119,7 @@ export async function getAllAdmins(): Promise<AdminUser[]> {
       .from("users")
       .select("id, name, email, image_url, role, created_at, updated_at")
       .eq("role", "admin")
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: true });
 
     if (error) {
       console.error("Error getting admins:", error);

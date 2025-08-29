@@ -2,15 +2,18 @@
 
 import { BarChart3, FileText, LogOut, Shield, Users } from "lucide-react";
 import React, { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AdminDashboard } from "@/components/admin/AdminDashboard";
 import { AdminLogin } from "@/components/admin/AdminLogin";
 import { AdminsManagement } from "@/components/admin/AdminsManagement";
 import { FeaturesManagement } from "@/components/admin/FeaturesManagement";
+
 import { DarkModeToggle } from "@/components/admin/DarkModeToggle";
 import { ChangePasswordModal } from "@/components/admin/ChangePasswordModal";
 import { AdminAuthProvider, useAdminAuth } from "@/hooks/useAdminAuth";
 import { DarkModeProvider } from "@/hooks/useDarkMode";
-import type { AdminTabType } from "@/types/admin";
+import type { AdminTabType, App } from "@/types/admin";
+import { useRef } from "react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,22 +25,42 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { usePersistentAppSelection } from "@/hooks/usePersistentAppSelection";
 
 function AdminContent() {
   const { isAuthenticated, currentAdmin, isLoading, logout } = useAdminAuth();
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const { selectedApp, setSelectedApp, restoreSelectedApp } = usePersistentAppSelection();
+
   const [activeTab, setActiveTab] = useState<AdminTabType>("dashboard");
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
+  // Handle tab changes and update URL
+  const handleTabChange = (newTab: AdminTabType) => {
+    setActiveTab(newTab);
+    // Update URL with new tab parameter
+    const params = new URLSearchParams();
+    params.set("tab", newTab);
+    router.replace(`/admin?${params.toString()}`, { scroll: false });
+  };
+
   useEffect(() => {
     if (isAuthenticated) {
-      setActiveTab("dashboard");
+      // Read tab from URL parameters, default to dashboard if not present
+      const urlTab = searchParams.get("tab") as AdminTabType;
+      const validTabs: AdminTabType[] = ["dashboard", "features", "admins"];
+      const initialTab = validTabs.includes(urlTab) ? urlTab : "dashboard";
+
+      setActiveTab(initialTab);
+
       // Check if admin needs to change default password
       if (currentAdmin?.isDefaultPassword) {
         setShowPasswordModal(true);
       }
     }
-  }, [isAuthenticated, currentAdmin?.isDefaultPassword]);
+  }, [isAuthenticated, currentAdmin?.isDefaultPassword, searchParams]);
 
   if (isLoading) {
     return (
@@ -69,13 +92,33 @@ function AdminContent() {
   const renderTabContent = () => {
     switch (activeTab) {
       case "dashboard":
-        return <AdminDashboard currentAdmin={currentAdmin} onLogout={logout} activeTab={activeTab} onTabChange={setActiveTab} />;
+        return (
+          <AdminDashboard
+            currentAdmin={currentAdmin}
+            onLogout={logout}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            selectedApp={selectedApp}
+            onAppSelect={setSelectedApp}
+            restoreSelectedApp={restoreSelectedApp}
+          />
+        );
       case "features":
-        return <FeaturesManagement />;
+        return <FeaturesManagement selectedApp={selectedApp} onAppSelect={setSelectedApp} activeTab={activeTab} />;
       case "admins":
         return <AdminsManagement />;
       default:
-        return <AdminDashboard currentAdmin={currentAdmin} onLogout={logout} activeTab={activeTab} onTabChange={setActiveTab} />;
+        return (
+          <AdminDashboard
+            currentAdmin={currentAdmin}
+            onLogout={logout}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            selectedApp={selectedApp}
+            onAppSelect={setSelectedApp}
+            restoreSelectedApp={restoreSelectedApp}
+          />
+        );
     }
   };
 
@@ -151,7 +194,7 @@ function AdminContent() {
             {tabs.map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => handleTabChange(tab.id)}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                   activeTab === tab.id
                     ? "bg-primary text-white dark:text-primary-foreground shadow-xs"
@@ -181,6 +224,8 @@ function AdminContent() {
           }}
         />
       )}
+
+      {/* Each tab now has its own AppManagement component */}
     </div>
   );
 }

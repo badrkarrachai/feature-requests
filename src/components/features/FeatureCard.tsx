@@ -56,6 +56,7 @@ export default function FeatureCard({
   isVotePending = false,
   email,
   name,
+  appSlug = "default", // Use 'default' app per new schema
 }: {
   item: Feature;
   showBottomBorder: boolean;
@@ -66,6 +67,7 @@ export default function FeatureCard({
   isVotePending?: boolean;
   email: string;
   name: string;
+  appSlug?: string;
 }) {
   const router = useRouter();
 
@@ -79,8 +81,9 @@ export default function FeatureCard({
       return;
     }
 
-    // Build the URL with email and name parameters
+    // Build the URL with app_slug, email and name parameters
     const params = new URLSearchParams();
+    params.set("app_slug", appSlug); // Always include app_slug
     if (email) params.set("email", email);
     if (name) params.set("name", name);
     const queryString = params.toString();
@@ -102,18 +105,18 @@ export default function FeatureCard({
   return (
     <Card
       className={`
-        border-x-0 shadow-none cursor-pointer hover:bg-gray-50/50 transition-colors
-        ${isFirstCard ? "border-t border-t-gray-200" : "border-t-0"}
-        ${showBottomBorder ? "border-b border-b-gray-200 rounded-none" : "border-b-0 rounded-t-none rounded-b-xl"}
+        border-x-0 shadow-none cursor-pointer hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors
+        ${isFirstCard ? "border-t border-t-gray-200 dark:border-t-gray-700" : "border-t-0"}
+        ${showBottomBorder ? "border-b border-b-gray-200 dark:border-b-gray-700 rounded-none" : "border-b-0 rounded-t-none rounded-b-xl"}
       `}
       onClick={handleCardClick}
     >
       <CardContent className="px-4 flex items-center justify-between">
         <div className="flex-1 pr-3">
-          <h3 className="font-semibold text-gray-900 line-clamp-2 overflow-hidden">{highlightedTitle}</h3>
-          <p className="text-sm text-gray-600 mt-1 line-clamp-2">{highlightedDescription}</p>
+          <h3 className="font-semibold text-gray-900 dark:text-gray-100 line-clamp-2 overflow-hidden">{highlightedTitle}</h3>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mt-1 line-clamp-2">{highlightedDescription}</p>
 
-          <div className="mt-3 flex items-center gap-3 text-sm text-gray-500">
+          <div className="mt-3 flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
             <div className="flex items-center gap-1">
               <svg
                 xmlns="http://www.w3.org/2000/svg"

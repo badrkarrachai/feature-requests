@@ -19,7 +19,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { ArrowLeft, ChevronUp, AlertCircle, MoreHorizontal, Edit, Trash2, Loader2 } from "lucide-react";
+import { ArrowLeft, ChevronUp, AlertCircle, MoreHorizontal, Edit, Trash2, Loader2, Star } from "lucide-react";
 import type { Feature } from "@/types";
 import StatusBadge from "./StatusBadge";
 import { formatNumber } from "@/lib/utils/numbers";
@@ -30,9 +30,23 @@ interface FeatureDetailContentProps {
   featureId: string;
   email: string;
   name: string;
+  appSlug: string;
+  urlImage?: string;
+  isAdmin?: boolean;
+  adminTab?: string;
+  from?: string;
 }
 
-export default function FeatureDetailContent({ featureId, email, name }: FeatureDetailContentProps) {
+export default function FeatureDetailContent({
+  featureId,
+  email,
+  name,
+  appSlug,
+  urlImage,
+  isAdmin = false,
+  adminTab = "features",
+  from,
+}: FeatureDetailContentProps) {
   const router = useRouter();
   const [feature, setFeature] = useState<Feature | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -42,6 +56,11 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
   const [initialComments, setInitialComments] = useState<any[] | null>(null);
   const [commentsMetadata, setCommentsMetadata] = useState<{ total: number; hasMore: boolean } | null>(null);
   const [addCommentToFeed, setAddCommentToFeed] = useState<((comment: any) => void) | null>(null);
+  const [isAdminUser, setIsAdminUser] = useState(isAdmin); // Use prop as initial value
+  const [currentAdminTab, setCurrentAdminTab] = useState(adminTab); // Track admin tab
+
+  // Determine if user came from admin panel based on the 'from' parameter
+  const cameFromAdmin = from === "admin";
 
   // Feature editing state
   const [isEditingFeature, setIsEditingFeature] = useState(false);
@@ -63,6 +82,17 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isCommentFocused]);
 
+  // Read admin_tab from URL parameters on mount
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const urlParams = new URLSearchParams(window.location.search);
+      const adminTabParam = urlParams.get("admin_tab");
+      if (adminTabParam) {
+        setCurrentAdminTab(adminTabParam);
+      }
+    }
+  }, []);
+
   // Load feature details with initial comments
   useEffect(() => {
     if (!email || !name || !featureId) return;
@@ -72,12 +102,19 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
       setError(null);
 
       try {
-        const res = await fetch(
-          `/api/features/${featureId}?email=${encodeURIComponent(email)}&name=${encodeURIComponent(name)}&includeComments=true`,
-          {
-            cache: "no-store",
-          }
-        );
+        const urlParams = new URLSearchParams({
+          app_slug: appSlug,
+          email: email,
+          name: name,
+          includeComments: "true",
+        });
+        if (urlImage) {
+          urlParams.set("url_image", urlImage);
+        }
+
+        const res = await fetch(`/api/features/${featureId}?${urlParams.toString()}`, {
+          cache: "no-store",
+        });
 
         if (!res.ok) {
           if (res.status === 404) {
@@ -88,6 +125,11 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
 
         const data = await res.json();
         setFeature(data);
+
+        // Update admin status based on API response
+        if (data.isAdmin !== undefined) {
+          setIsAdminUser(data.isAdmin);
+        }
 
         // Store initial comments data to pass directly to ActivityFeed
         if (data.comments) {
@@ -179,11 +221,20 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
   };
 
   const handleBack = () => {
-    const currentParams = new URLSearchParams();
-    if (email) currentParams.set("email", email);
-    if (name) currentParams.set("name", name);
+    if (cameFromAdmin) {
+      // Navigate back to admin panel with the remembered tab
+      const adminParams = new URLSearchParams();
+      adminParams.set("tab", currentAdminTab);
+      router.push(`/admin?${adminParams.toString()}`);
+    } else {
+      // Navigate back to features list for regular users
+      const currentParams = new URLSearchParams();
+      currentParams.set("app_slug", appSlug); // Always include app_slug
+      if (email) currentParams.set("email", email);
+      if (name) currentParams.set("name", name);
 
-    router.push(`/features?${currentParams.toString()}`);
+      router.push(`/features?${currentParams.toString()}`);
+    }
   };
 
   // Check if current user is the author of the feature
@@ -211,15 +262,35 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
 
     setIsUpdatingFeature(true);
     try {
-      const res = await fetch(`/api/features/${featureId}/author-edit`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const urlParams = new URLSearchParams({
+        app_slug: appSlug,
+      });
+
+      let endpoint: string;
+      let requestBody: any;
+
+      if (isAdminUser) {
+        // Admin users use the main feature endpoint with PATCH
+        endpoint = `/api/features/${featureId}?${urlParams.toString()}`;
+        requestBody = {
+          title: editedTitle.trim(),
+          description: editedDescription.trim(),
+        };
+      } else {
+        // Regular users use the author-edit endpoint
+        endpoint = `/api/features/${featureId}/author-edit`;
+        requestBody = {
           email,
           name,
           title: editedTitle.trim(),
           description: editedDescription.trim(),
-        }),
+        };
+      }
+
+      const res = await fetch(endpoint, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
       });
 
       if (!res.ok) {
@@ -234,8 +305,8 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
         prev
           ? {
               ...prev,
-              title: data.feature.title,
-              description: data.feature.description,
+              title: data.feature?.title || data.title,
+              description: data.feature?.description || data.description,
             }
           : null
       );
@@ -257,10 +328,26 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
 
     setIsDeletingFeature(true);
     try {
-      const res = await fetch(`/api/features/${featureId}/author-delete`, {
+      let endpoint: string;
+      let requestBody: any;
+
+      if (isAdminUser) {
+        // Admin users use the main feature endpoint with DELETE
+        const urlParams = new URLSearchParams({
+          app_slug: appSlug,
+        });
+        endpoint = `/api/features/${featureId}?${urlParams.toString()}`;
+        requestBody = {};
+      } else {
+        // Regular users use the author-delete endpoint
+        endpoint = `/api/features/${featureId}/author-delete`;
+        requestBody = { email, name };
+      }
+
+      const res = await fetch(endpoint, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, name }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!res.ok) {
@@ -278,18 +365,77 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
     }
   };
 
-  const getUserAvatar = (authorName: string, imageUrl?: string) => {
+  const getUserAvatar = (authorName: string, imageUrl?: string, authorRole?: string) => {
     if (imageUrl) {
-      return <img src={imageUrl} alt={authorName} className="w-8 h-8 rounded-full object-cover flex-shrink-0" />;
+      return (
+        <div className="relative flex-shrink-0">
+          <img src={imageUrl} alt={authorName} className="w-8 h-8 rounded-full object-cover" />
+          {authorRole === "admin" && (
+            <div className="absolute -bottom-0.5 -right-0.5 sm:-bottom-1 sm:-right-1">
+              <div className="w-4 h-4 sm:w-5 sm:h-5 bg-white dark:bg-gray-700 rounded-full flex items-center justify-center">
+                <div className="w-3 h-3 sm:w-4 sm:h-4 bg-primary rounded-full flex items-center justify-center">
+                  <Star className="w-2 h-2 sm:w-2.5 sm:h-2.5 text-white fill-current" />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
     }
 
     const initial = (authorName || "U").charAt(0).toUpperCase();
-    const colors = ["bg-red-500", "bg-blue-500", "bg-green-500", "bg-yellow-500", "bg-purple-500", "bg-pink-500", "bg-indigo-500", "bg-orange-500"];
+    const colors = [
+      "bg-red-500",
+      "bg-red-600",
+      "bg-blue-500",
+      "bg-blue-600",
+      "bg-green-500",
+      "bg-green-600",
+      "bg-yellow-500",
+      "bg-yellow-600",
+      "bg-purple-500",
+      "bg-purple-600",
+      "bg-pink-500",
+      "bg-pink-600",
+      "bg-indigo-500",
+      "bg-indigo-600",
+      "bg-orange-500",
+      "bg-orange-600",
+      "bg-teal-500",
+      "bg-teal-600",
+      "bg-cyan-500",
+      "bg-cyan-600",
+      "bg-lime-500",
+      "bg-lime-600",
+      "bg-emerald-500",
+      "bg-emerald-600",
+      "bg-rose-500",
+      "bg-rose-600",
+      "bg-violet-500",
+      "bg-violet-600",
+      "bg-fuchsia-500",
+      "bg-fuchsia-600",
+      "bg-amber-500",
+      "bg-amber-600",
+      "bg-sky-500",
+      "bg-sky-600",
+    ];
     const colorIndex = authorName.length % colors.length;
 
     return (
-      <div className={`w-8 h-8 ${colors[colorIndex]} rounded-full flex items-center justify-center flex-shrink-0`}>
-        <span className="text-white text-sm font-semibold">{initial}</span>
+      <div className="relative flex-shrink-0">
+        <div className={`w-8 h-8 ${colors[colorIndex]} rounded-full flex items-center justify-center`}>
+          <span className="text-white text-sm font-semibold">{initial}</span>
+        </div>
+        {authorRole === "admin" && (
+          <div className="absolute -bottom-0.5 -right-0.5 sm:-bottom-1 sm:-right-1">
+            <div className="w-4 h-4 sm:w-5 sm:h-5 bg-white dark:bg-gray-700 rounded-full flex items-center justify-center">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 bg-primary rounded-full flex items-center justify-center">
+                <Star className="w-2 h-2 sm:w-2.5 sm:h-2.5 text-white fill-current" />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -311,21 +457,21 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
         <div className="space-y-6">
           {/* Header skeleton */}
           <div className="flex items-center gap-3">
-            <div className="w-6 h-6 bg-gray-200 rounded animate-pulse" />
-            <div className="w-32 h-6 bg-gray-200 rounded animate-pulse" />
+            <div className="w-6 h-6 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
+            <div className="w-32 h-6 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
           </div>
 
           {/* Content skeleton */}
-          <Card className="shadow-xs">
+          <Card className="shadow-xs dark:shadow-gray-800">
             <CardContent className="p-6 space-y-4">
-              <div className="w-3/4 h-8 bg-gray-200 rounded animate-pulse" />
+              <div className="w-3/4 h-8 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
               <div className="flex items-center gap-3">
-                <div className="w-16 h-6 bg-gray-200 rounded animate-pulse" />
-                <div className="w-12 h-12 bg-gray-200 rounded animate-pulse" />
+                <div className="w-16 h-6 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
+                <div className="w-12 h-12 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
               </div>
               <div className="space-y-2">
-                <div className="w-full h-4 bg-gray-200 rounded animate-pulse" />
-                <div className="w-2/3 h-4 bg-gray-200 rounded animate-pulse" />
+                <div className="w-full h-4 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
+                <div className="w-2/3 h-4 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
               </div>
             </CardContent>
           </Card>
@@ -340,7 +486,7 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
         <div className="space-y-6">
           <Button variant="ghost" onClick={handleBack} className="flex items-center bg-[#f0f0f0] gap-2 text-gray-800 hover:text-gray-900 p-0">
             <ArrowLeft className="w-5 h-5" />
-            <span className="text-sm font-medium text-gray-500">BACK TO ALL POSTS</span>
+            <span className="text-sm font-medium text-gray-500">{cameFromAdmin ? "BACK TO ADMIN PANEL" : "BACK TO ALL POSTS"}</span>
           </Button>
 
           <Alert variant="destructive">
@@ -364,14 +510,20 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 dark:bg-[#0f0f0f]">
       {/* Mobile Header */}
-      <div className="bg-white border-b border-gray-200 sticky top-0 z-10">
+      <div className="bg-card border-b border-border sticky top-0 z-10">
         <div className="container mx-auto max-w-3xl px-4 py-4">
           <div className="flex items-center justify-between">
-            <Button variant="ghost" onClick={handleBack} className="flex items-center bg-[#f0f0f0] gap-2 text-gray-800 hover:text-gray-900 p-0">
+            <Button
+              variant="ghost"
+              onClick={handleBack}
+              className="flex items-center bg-[#f0f0f0] dark:bg-gray-800/60 gap-2 text-gray-800 dark:text-gray-200 hover:text-gray-900 dark:hover:text-gray-100 p-0"
+            >
               <ArrowLeft className="w-5 h-5" />
-              <span className="text-sm font-medium text-gray-500">BACK TO ALL POSTS</span>
+              <span className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                {cameFromAdmin ? "BACK TO ADMIN PANEL" : "BACK TO ALL POSTS"}
+              </span>
             </Button>
           </div>
         </div>
@@ -379,12 +531,14 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
 
       <div className="container mx-auto max-w-3xl px-4 py-4">
         {/* Feature Header */}
-        <Card className="mb-4 shadow-xs">
+        <Card className="mb-4 shadow-xs dark:shadow-gray-800">
           <CardContent className="px-6 py-2">
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1">
                 {/* Vote count and title */}
                 <div className="flex items-start gap-4 mb-4">
+                  {/* Only show voting for non-admin users */}
+
                   <div className="flex flex-col items-center">
                     <Button
                       variant="outline"
@@ -425,11 +579,12 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
                             }}
                           />
                         ) : (
-                          <h1 className="text-lg font-semibold text-gray-900 leading-tight">{feature.title}</h1>
+                          <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100 leading-tight">{feature.title}</h1>
                         )}
                       </div>
 
-                      {isFeatureAuthor && (
+                      {/* Show edit/delete options for feature author OR admin */}
+                      {(isFeatureAuthor || isAdminUser) && (
                         <div className="flex items-center gap-2 flex-shrink-0">
                           {isUpdatingFeature || isDeletingFeature ? (
                             <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
@@ -490,10 +645,10 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
 
                 {/* Author info */}
                 <div className="flex items-center gap-3 mb-4">
-                  {getUserAvatar(feature.author_name || feature.name || "Unknown User", feature.author_image_url)}
+                  {getUserAvatar(feature.author_name || "Unknown User", feature.author_image_url, feature.author_role)}
                   <div>
-                    <div className="text-sm font-semibold text-gray-900 capitalize">{feature.author_name || feature.name || "Unknown User"}</div>
-                    <div className="text-xs text-gray-500">
+                    <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 capitalize">{feature.author_name || "Unknown User"}</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
                       {new Date(feature.created_at).toLocaleDateString("en-US", {
                         year: "numeric",
                         month: "long",
@@ -531,13 +686,13 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
                       </div>
                     </div>
                   ) : (
-                    <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">{feature.description}</p>
+                    <p className="text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">{feature.description}</p>
                   )}
                 </div>
 
-                {/* Inline Comment Input - Hidden during feature editing */}
+                {/* Inline Comment Input - Hidden during feature editing and for admin users */}
                 {!isEditingFeature && (
-                  <div className="border-t border-gray-100 pt-4">
+                  <div className="border-t border-gray-100 dark:border-gray-700 pt-4">
                     <CommentForm
                       featureId={featureId}
                       email={email}
@@ -557,6 +712,7 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
                         }, 150);
                       }}
                       isFocused={isCommentFocused}
+                      appSlug={appSlug}
                     />
                   </div>
                 )}
@@ -571,9 +727,12 @@ export default function FeatureDetailContent({ featureId, email, name }: Feature
             featureId={featureId}
             email={email}
             name={name}
+            appSlug={appSlug}
+            urlImage={urlImage}
             initialComments={initialComments}
             initialCommentsMetadata={commentsMetadata}
             onAddComment={(addCommentFn) => setAddCommentToFeed(() => addCommentFn)}
+            isAdmin={isAdminUser}
           />
         )}
       </div>

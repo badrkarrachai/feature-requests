@@ -7,6 +7,7 @@ import {
   CircleAlert,
   Clock,
   Filter,
+  Globe,
   Layers,
   Loader,
   MessageSquare,
@@ -17,13 +18,18 @@ import {
   User,
 } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { adminApi } from "@/services/adminApi";
-import type { FeatureRequest } from "@/types/admin";
+import type { FeatureRequest, App } from "@/types/admin";
 import useDebounce from "@/hooks/useDebounce";
 import { formatCount } from "@/lib/utils/numbers";
+import { getAppsCache, subscribeToCacheUpdates } from "./AppSelector";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+
+import { EmptyState } from "./EmptyState";
+import { AppManagement, AppManagementRef } from "./AppManagement";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -35,10 +41,17 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
+import { useAdminAuth } from "@/hooks/useAdminAuth";
 
 // Types for better type safety
 type SortOption = "new" | "trending" | "top";
 type FilterOption = "all" | "open" | "under_review" | "planned" | "in_progress" | "done" | "mine";
+
+interface FeaturesManagementProps {
+  selectedApp: App | null;
+  onAppSelect: (app: App | null) => void;
+  activeTab?: string;
+}
 
 interface LoadingState {
   initial: boolean;
@@ -136,7 +149,11 @@ const sortConfig = {
   },
 };
 
-export function FeaturesManagement() {
+export function FeaturesManagement({ selectedApp, onAppSelect, activeTab = "features" }: FeaturesManagementProps) {
+  const router = useRouter();
+  const { currentAdmin } = useAdminAuth();
+  const hiddenAppManagementRef = useRef<AppManagementRef>(null);
+
   // Core state
   const [features, setFeatures] = useState<FeatureRequest[]>([]);
   const [page, setPage] = useState(1);
@@ -182,6 +199,8 @@ export function FeaturesManagement() {
   const [isUpdating, setIsUpdating] = useState<string | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [featureToDelete, setFeatureToDelete] = useState<{ id: string; title: string } | null>(null);
+  const [showEmptyState, setShowEmptyState] = useState(false);
+  const [hasNoApps, setHasNoApps] = useState(false);
 
   // Refs
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -196,8 +215,8 @@ export function FeaturesManagement() {
   const debouncedSearchQuery = useDebounce(searchQuery, 300);
 
   // Generate search key for caching
-  const getSearchKey = useCallback((query: string, filter: FilterOption, sort: SortOption) => {
-    return `${query || "empty"}|${filter}|${sort}`;
+  const getSearchKey = useCallback((query: string, filter: FilterOption, sort: SortOption, appSlug?: string) => {
+    return `${query || "empty"}|${filter}|${sort}|${appSlug || "all"}`;
   }, []);
 
   // Get cached results for a search key
@@ -233,7 +252,7 @@ export function FeaturesManagement() {
       }
 
       // Generate current search key
-      const searchKey = getSearchKey(debouncedSearchQuery, statusFilter, sortBy);
+      const searchKey = getSearchKey(debouncedSearchQuery, statusFilter, sortBy, selectedApp?.slug);
 
       // Update loading state
       setLoading((prev) => ({
@@ -266,6 +285,7 @@ export function FeaturesManagement() {
           sort: sortBy,
           limit: 10,
           page: pageNum,
+          app_slug: selectedApp?.slug,
         });
 
         // Check if this request is still the latest
@@ -334,15 +354,69 @@ export function FeaturesManagement() {
         }
       }
     },
-    [debouncedSearchQuery, statusFilter, sortBy, features.length, getSearchKey, getCachedResults]
+    [debouncedSearchQuery, statusFilter, sortBy, selectedApp, features.length, getSearchKey, getCachedResults]
   );
+
+  // Helper function to determine if there are no apps
+  const checkAppsState = () => {
+    const appsCache = getAppsCache();
+
+    if (selectedApp) {
+      // Clear cache when app changes to avoid stale data
+      setSearchCache({});
+      setPage(1);
+      setHasMore(false);
+      setFeatures([]);
+      setTotalCount(0);
+
+      const initialSearchKey = getSearchKey("", "all", "new", selectedApp.slug);
+      setCurrentSearchKey(initialSearchKey);
+      setShowEmptyState(false);
+      setHasNoApps(false);
+      loadFeatures(1, "replace");
+      return;
+    }
+
+    // Reset state when no app is selected
+    setFeatures([]);
+    setTotalCount(0);
+    setPage(1);
+    setHasMore(false);
+    setLoading((prev) => ({ ...prev, initial: false, more: false, search: false }));
+
+    if (appsCache === null) {
+      // Cache is still loading, don't show any empty state yet
+      setShowEmptyState(false);
+      setHasNoApps(false);
+    } else if (appsCache.apps.length === 0) {
+      // No apps exist at all - show getting started UI
+      setHasNoApps(true);
+      setShowEmptyState(false);
+    } else {
+      // Apps exist but none selected - show regular empty state
+      setHasNoApps(false);
+
+      // Delay showing empty state to prevent flash during initial load
+      const timer = setTimeout(() => {
+        setShowEmptyState(true);
+      }, 500);
+
+      return () => clearTimeout(timer);
+    }
+  };
 
   // Initial load
   useEffect(() => {
-    const initialSearchKey = getSearchKey("", "all", "new");
-    setCurrentSearchKey(initialSearchKey);
-    loadFeatures(1, "replace");
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    // Check apps state initially
+    checkAppsState();
+
+    // Subscribe to cache updates
+    const unsubscribe = subscribeToCacheUpdates(() => {
+      checkAppsState();
+    });
+
+    return unsubscribe;
+  }, [selectedApp?.slug]); // Only depend on slug, not entire object
 
   // Clean up expired cache entries
   useEffect(() => {
@@ -368,6 +442,9 @@ export function FeaturesManagement() {
 
   // Handle search/filter/sort changes with smart caching
   useEffect(() => {
+    // Only handle search changes when we have a selected app
+    if (!selectedApp) return;
+
     const currentSearchState: SearchState = {
       query: debouncedSearchQuery,
       filter: statusFilter,
@@ -383,7 +460,7 @@ export function FeaturesManagement() {
 
     if (hasSearchChanged) {
       // Generate new search key
-      const newSearchKey = getSearchKey(debouncedSearchQuery, statusFilter, sortBy);
+      const newSearchKey = getSearchKey(debouncedSearchQuery, statusFilter, sortBy, selectedApp.slug);
       setCurrentSearchKey(newSearchKey);
 
       // Check if we have cached results for this search
@@ -410,7 +487,7 @@ export function FeaturesManagement() {
 
       searchStateRef.current = currentSearchState;
     }
-  }, [debouncedSearchQuery, statusFilter, sortBy, loadFeatures, getSearchKey, getCachedResults]);
+  }, [debouncedSearchQuery, statusFilter, sortBy, selectedApp?.slug, loadFeatures, getSearchKey, getCachedResults]);
 
   // Intersection observer for infinite scroll
   useEffect(() => {
@@ -485,6 +562,21 @@ export function FeaturesManagement() {
     }
   };
 
+  const handleFeatureClick = (featureId: string) => {
+    if (!currentAdmin || !selectedApp) return;
+
+    // Navigate to feature detail page with admin context and current tab
+    const params = new URLSearchParams({
+      email: currentAdmin.email,
+      name: currentAdmin.name,
+      app_slug: selectedApp.slug,
+      admin_tab: activeTab,
+      from: "admin",
+    });
+
+    router.push(`/features/${featureId}?${params.toString()}`);
+  };
+
   // Load more indicator component
   const LoadMoreIndicator = ({ isVisible }: { isVisible: boolean }) => {
     if (!isVisible) return null;
@@ -528,9 +620,58 @@ export function FeaturesManagement() {
   // Smart highlighting - only show when results are loaded and we have a search term
   const shouldHighlightSearch = shouldHighlight && lastSearchTerm.length > 0;
 
+  // Show loading until we have a selected app
+  if (!selectedApp) {
+    return (
+      <>
+        <div className="space-y-6">
+          {/* App Selector - Hide when empty state is showing */}
+          {!(hasNoApps || showEmptyState) && (
+            <div className="bg-card rounded-2xl p-4 md:p-6 border border-border shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-foreground mb-1">Application Management</h2>
+                  <p className="text-sm text-muted-foreground">Select an application to manage its features and data</p>
+                </div>
+                <AppManagement selectedApp={null} onAppSelect={onAppSelect} className="w-full sm:w-auto" />
+              </div>
+            </div>
+          )}
+
+          {/* Hidden AppManagement for empty state modal */}
+          {(hasNoApps || showEmptyState) && (
+            <div style={{ display: "none" }}>
+              <AppManagement ref={hiddenAppManagementRef} selectedApp={null} onAppSelect={onAppSelect} />
+            </div>
+          )}
+
+          {/* Empty State */}
+          {hasNoApps || showEmptyState ? (
+            <EmptyState
+              type={hasNoApps ? "no-apps" : "no-selection"}
+              context="features"
+              onCreateApp={() => hiddenAppManagementRef.current?.openCreateModal()}
+            />
+          ) : null}
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
       <div className="space-y-6">
+        {/* App Selector */}
+        <div className="bg-card rounded-2xl p-4 md:p-6 border border-border shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-foreground mb-1">Application Management</h2>
+              <p className="text-sm text-muted-foreground">Select an application to manage its features and data</p>
+            </div>
+            <AppManagement selectedApp={selectedApp} onAppSelect={onAppSelect} className="w-full sm:w-auto" />
+          </div>
+        </div>
+
         {/* Search and Filters */}
         <div className="bg-card rounded-2xl p-6 border border-border shadow-xs">
           <div className="space-y-4">
@@ -681,7 +822,9 @@ export function FeaturesManagement() {
                 return (
                   <div
                     key={`feature-${feature.id}`}
-                    className="bg-card rounded-2xl p-4 sm:p-6 border border-border shadow-xs hover:shadow-sm transition-shadow"
+                    className="bg-card rounded-2xl p-4 sm:p-6 border border-border shadow-xs hover:shadow-md hover:border-primary/20 transition-all cursor-pointer"
+                    onClick={() => handleFeatureClick(feature.id)}
+                    title="Click to view feature details"
                   >
                     {/* Mobile: Column layout, Desktop: Row layout */}
                     <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 lg:gap-6">
@@ -729,6 +872,12 @@ export function FeaturesManagement() {
                             </div>
                             <span className="text-xs sm:text-sm">{new Date(feature.created_at).toLocaleDateString()}</span>
                           </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
+                              <Globe className="w-4 h-4" />
+                            </div>
+                            <span className="text-xs sm:text-sm">{feature.app_name}</span>
+                          </div>
                         </div>
                       </div>
 
@@ -739,7 +888,10 @@ export function FeaturesManagement() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => handleDeleteFeature(feature.id, feature.title)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteFeature(feature.id, feature.title);
+                            }}
                             disabled={isUpdating === feature.id}
                             className="w-full px-3 py-2 h-9 border-destructive/20 text-destructive hover:text-destructive hover:bg-destructive/10 hover:border-destructive/30 transition-colors"
                             title="Delete feature"
@@ -760,6 +912,7 @@ export function FeaturesManagement() {
                                 size="sm"
                                 disabled={isUpdating === feature.id}
                                 className={`w-full justify-between px-3 py-2 h-9 ${statusConfig[feature.status]?.color || ""}`}
+                                onClick={(e) => e.stopPropagation()}
                               >
                                 <div className="flex items-center gap-2">
                                   {React.createElement(statusConfig[feature.status]?.icon || AlertCircle, {
@@ -774,7 +927,10 @@ export function FeaturesManagement() {
                               {Object.entries(statusConfig).map(([statusKey, statusInfo]) => (
                                 <DropdownMenuItem
                                   key={statusKey}
-                                  onClick={() => handleStatusUpdate(feature.id, statusKey)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleStatusUpdate(feature.id, statusKey);
+                                  }}
                                   disabled={isUpdating === feature.id}
                                 >
                                   <div className="flex items-center gap-2 w-full">

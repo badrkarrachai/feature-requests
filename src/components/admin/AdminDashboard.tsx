@@ -9,6 +9,7 @@ import {
   CircleAlert,
   Clock,
   FileText,
+  Globe,
   Loader,
   MessageSquare,
   Shield,
@@ -17,15 +18,27 @@ import {
   Users,
 } from "lucide-react";
 import React, { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { adminApi } from "@/services/adminApi";
-import type { AdminStats, AdminTabType, AdminUser, FeatureRequest } from "@/types/admin";
+import type { AdminStats, AdminTabType, AdminUser, FeatureRequest, App } from "@/types/admin";
 import { formatNumber, formatCount } from "@/lib/utils/numbers";
+import { addAppToCache, setAppsCache, getAppsCache, subscribeToCacheUpdates } from "./AppSelector";
+
+import { EmptyState } from "./EmptyState";
+import { useAdminAuth } from "@/hooks/useAdminAuth";
+
+import { toast } from "sonner";
+import { AppManagement, AppManagementRef } from "./AppManagement";
+import { useRef } from "react";
 
 interface AdminDashboardProps {
   currentAdmin: AdminUser;
   onLogout: () => void;
   activeTab: AdminTabType;
   onTabChange: (tab: AdminTabType) => void;
+  selectedApp: App | null;
+  onAppSelect: (app: App | null) => void;
+  restoreSelectedApp?: (availableApps: App[]) => void;
 }
 
 const statusConfig = {
@@ -51,7 +64,18 @@ const statusConfig = {
   },
 };
 
-export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange }: AdminDashboardProps) {
+export function AdminDashboard({
+  currentAdmin,
+  onLogout,
+  activeTab,
+  onTabChange,
+  selectedApp,
+  onAppSelect,
+  restoreSelectedApp,
+}: AdminDashboardProps) {
+  const router = useRouter();
+  const { currentAdmin: authAdmin } = useAdminAuth();
+  const hiddenAppManagementRef = useRef<AppManagementRef>(null);
   const [stats, setStats] = useState<AdminStats>({
     totalFeatures: 0,
     totalVotes: 0,
@@ -85,19 +109,78 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
       periodEnd: string;
     };
   }>({});
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const [showEmptyState, setShowEmptyState] = useState(false);
+  const [hasNoApps, setHasNoApps] = useState(false);
 
+  // Helper function to determine if there are no apps
+  const checkAppsState = () => {
+    const appsCache = getAppsCache();
+
+    if (selectedApp) {
+      setShowEmptyState(false);
+      setHasNoApps(false);
+      return;
+    }
+
+    // Reset loading state when no app is selected
+    setIsLoading(false);
+
+    if (appsCache === null) {
+      // Cache is still loading, don't show any empty state yet
+      setShowEmptyState(false);
+      setHasNoApps(false);
+    } else if (appsCache.apps.length === 0) {
+      // No apps exist at all - show getting started UI
+      setHasNoApps(true);
+      setShowEmptyState(false);
+    } else {
+      // Apps exist but none selected
+      setHasNoApps(false);
+
+      // Only show empty state if we've waited long enough for app selection to happen
+      // and still no app is selected. This prevents showing empty state during initial load.
+      const timer = setTimeout(() => {
+        // Double-check that we still don't have a selected app and apps are loaded
+        const currentCache = getAppsCache();
+        if (!selectedApp && currentCache && currentCache.apps.length > 0) {
+          setShowEmptyState(true);
+        }
+      }, 1000); // Increased timeout to give more time for auto-selection
+
+      return () => clearTimeout(timer);
+    }
+  };
+
+  // Load dashboard data when app changes
   useEffect(() => {
-    loadDashboardData();
-  }, []);
+    if (selectedApp) {
+      loadDashboardData();
+    }
+  }, [selectedApp]);
+
+  // Handle app state changes (empty states, etc.)
+  useEffect(() => {
+    // Check apps state initially
+    checkAppsState();
+
+    // Subscribe to cache updates
+    const unsubscribe = subscribeToCacheUpdates(() => {
+      checkAppsState();
+    });
+
+    return unsubscribe;
+  }, [selectedApp]); // Reload when selectedApp changes (including from null to an app)
 
   const loadDashboardData = async () => {
     try {
       setIsLoading(true);
+      const appSlug = selectedApp?.slug;
+
       const [statsData, featuresData, trendsData] = await Promise.all([
-        adminApi.getAdminStats(),
-        adminApi.getFeatures({ limit: 5, sort: "new" }),
-        adminApi.getTrends(),
+        adminApi.getAdminStats(appSlug),
+        adminApi.getFeatures({ limit: 5, sort: "new", app_slug: appSlug }),
+        adminApi.getTrends(appSlug),
       ]);
 
       setStats(statsData);
@@ -124,6 +207,21 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
     if (percentage > 0) return "text-green-600 bg-green-50 dark:bg-green-900/20 dark:text-green-400";
     if (percentage < 0) return "text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400";
     return "text-gray-600 bg-gray-50 dark:bg-gray-900/20 dark:text-gray-400";
+  };
+
+  const handleFeatureClick = (featureId: string) => {
+    if (!authAdmin || !selectedApp) return;
+
+    // Navigate to feature detail page with admin context and current tab
+    const params = new URLSearchParams({
+      email: authAdmin.email,
+      name: authAdmin.name,
+      app_slug: selectedApp.slug,
+      admin_tab: activeTab,
+      from: "admin",
+    });
+
+    router.push(`/features/${featureId}?${params.toString()}`);
   };
 
   const statCards = [
@@ -183,10 +281,69 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
     { id: "admins" as AdminTabType, label: "Admins", icon: Users },
   ];
 
+  // Show loading during initial load, empty state only when no apps available after delay
+  if (!selectedApp || isLoading) {
+    return (
+      <>
+        {/* App Selector - Hide when empty state is showing */}
+        {!(hasNoApps || showEmptyState) && (
+          <div className="bg-card rounded-2xl p-4 md:p-6 border border-border shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground mb-1">Application Management</h2>
+                <p className="text-sm text-muted-foreground">Select an application to manage its features and data</p>
+              </div>
+              <AppManagement
+                selectedApp={selectedApp}
+                onAppSelect={onAppSelect}
+                restoreSelectedApp={restoreSelectedApp}
+                className="w-full sm:w-auto"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Hidden AppManagement for empty state modal */}
+        {!selectedApp && (hasNoApps || showEmptyState) && (
+          <div style={{ display: "none" }}>
+            <AppManagement ref={hiddenAppManagementRef} selectedApp={selectedApp} onAppSelect={onAppSelect} restoreSelectedApp={restoreSelectedApp} />
+          </div>
+        )}
+
+        {/* Empty State */}
+        {!selectedApp && (hasNoApps || showEmptyState) && (
+          <EmptyState
+            type={hasNoApps ? "no-apps" : "no-selection"}
+            context="dashboard"
+            onCreateApp={() => hiddenAppManagementRef.current?.openCreateModal()}
+          />
+        )}
+
+        {/* Loading Dashboard Data */}
+        {selectedApp && isLoading && (
+          <div className="bg-card rounded-2xl p-12 border border-border text-center mt-6 md:mt-8">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+            <p className="text-muted-foreground">Loading dashboard data...</p>
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
     <>
       {/* Dashboard Content */}
       <div className="space-y-6 md:space-y-8">
+        {/* App Selector */}
+        <div className="bg-card rounded-2xl p-4 md:p-6 border border-border shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-foreground mb-1">Application Management</h2>
+              <p className="text-sm text-muted-foreground">Select an application to manage its features and data</p>
+            </div>
+            <AppManagement selectedApp={selectedApp} onAppSelect={onAppSelect} restoreSelectedApp={restoreSelectedApp} className="w-full sm:w-auto" />
+          </div>
+        </div>
         {/* Stats Cards */}
         <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 md:gap-6 gap-4">
           {statCards.map((stat, index) => (
@@ -253,7 +410,12 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
               recentFeatures.slice(0, 5).map((feature) => {
                 const StatusIcon = statusConfig[feature.status]?.icon || AlertCircle;
                 return (
-                  <div key={feature.id} className="p-4 md:p-6 hover:bg-muted/50 transition-colors">
+                  <div
+                    key={feature.id}
+                    className="p-4 md:p-6 hover:bg-muted/50 transition-colors cursor-pointer"
+                    onClick={() => handleFeatureClick(feature.id)}
+                    title="Click to view feature details"
+                  >
                     <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
                       <div className="flex-1">
                         <div className="flex flex-col gap-2 mb-2">
@@ -304,6 +466,12 @@ export function AdminDashboard({ currentAdmin, onLogout, activeTab, onTabChange 
                               <Clock className="w-4 h-4" />
                             </div>
                             <span className="text-xs sm:text-sm">{new Date(feature.created_at).toLocaleDateString()}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 bg-muted rounded-full flex items-center justify-center flex-shrink-0">
+                              <Globe className="w-4 h-4" />
+                            </div>
+                            <span className="text-xs sm:text-sm">{feature.app_name}</span>
                           </div>
                         </div>
                       </div>

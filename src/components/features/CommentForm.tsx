@@ -9,6 +9,7 @@ interface CommentFormProps {
   featureId: string;
   email: string;
   name: string;
+  appSlug: string;
   onCommentAdded?: (newComment: any) => void; // Pass the new comment data
   parentCommentId?: string | null; // For replies
   placeholder?: string;
@@ -22,6 +23,7 @@ export default function CommentForm({
   featureId,
   email,
   name,
+  appSlug,
   onCommentAdded,
   parentCommentId = null,
   placeholder = "Leave a comment",
@@ -52,6 +54,7 @@ export default function CommentForm({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          app_slug: appSlug,
           content: comment.trim(),
           email,
           name,
@@ -84,7 +87,7 @@ export default function CommentForm({
         value={comment}
         onChange={(e) => setComment(e.target.value)}
         placeholder={placeholder}
-        className=" min-h-[2.5rem] border-gray-200 focus:border-blue-500 focus:ring-blue-500 transition-all duration-200 resize-none"
+        className=" min-h-[2.5rem] border-gray-200 dark:border-gray-600 focus:border-blue-500 dark:focus:border-blue-400 focus:ring-blue-500 dark:focus:ring-blue-400 transition-all duration-200 resize-none"
         disabled={isSubmitting}
         onFocus={onFocus}
         onBlur={onBlur}
@@ -109,7 +112,7 @@ export default function CommentForm({
             className="flex items-center gap-1.5 h-9 px-2 text-xs text-white font-semibold"
           >
             {isSubmitting ? (
-              <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              <div className="w-3 h-3 border-2 border-white dark:border-gray-300 border-t-transparent rounded-full animate-spin" />
             ) : (
               <SendHorizonal className="w-3 h-3" />
             )}
