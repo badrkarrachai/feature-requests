@@ -5,12 +5,14 @@ import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
 
 export const runtime = "nodejs";
 
-// GET /api/features/[id]/comments?email=&name=&sort=newest|oldest&limit=10&page=1
+// GET /api/features/[id]/comments?app_slug=&email=&name=&url_image=&sort=newest|oldest&limit=10&page=1
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   const { searchParams } = new URL(req.url);
+  const appSlug = searchParams.get("app_slug") || "default"; // Use 'default' app per new schema
   const email = searchParams.get("email") || "";
   const name = searchParams.get("name") || "";
+  const urlImage = searchParams.get("url_image") || null;
   const sort = searchParams.get("sort") || "newest";
 
   // Pagination parameters
@@ -23,6 +25,18 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     return NextResponse.json({ error: "email and name are required" }, { status: 400 });
   }
 
+  // Ensure user exists/updates if email and name are provided
+  try {
+    await supabaseAdmin.rpc("ensure_user", {
+      p_email: email.toLowerCase().trim(),
+      p_name: name.trim().toLowerCase(),
+      p_image_url: urlImage,
+    });
+  } catch (error) {
+    console.error("Error ensuring user exists:", error);
+    // Continue with the request even if user creation fails
+  }
+
   try {
     // Verify feature exists
     const { data: feature } = await supabaseAdmin.from("features").select("id").eq("id", id).single();
@@ -31,27 +45,52 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       return NextResponse.json({ error: "Feature not found" }, { status: 404 });
     }
 
-    // Use new RPC function with nested replies structure
+    // Use new RPC function with nested replies structure and app scoping [[memory:7247173]]
     let comments = [];
     let total = 0;
 
     try {
-      const { data: rpcResult, error } = await supabaseAdmin.rpc("get_comments_with_replies", {
+      // Get main comments using simple function
+      const { data: mainComments, error: commentsError } = await supabaseAdmin.rpc("get_comments_with_user_likes", {
+        p_app_slug: appSlug.toLowerCase().trim(),
         p_email: email.toLowerCase().trim(),
         p_feature_id: id,
         p_sort: sort,
         p_limit: limit,
         p_offset: from,
-        p_replies_limit: 3, // Load first 3 replies initially
       });
 
-      if (error) {
-        console.error("Error with get_comments_with_replies RPC function:", error);
-        throw error;
+      if (commentsError) {
+        console.error("Error with get_comments_with_user_likes RPC function:", commentsError);
+        throw commentsError;
       }
 
-      // The RPC returns a JSON array of comments with nested replies
-      comments = Array.isArray(rpcResult) ? rpcResult : [];
+      const mainCommentsArray = Array.isArray(mainComments) ? mainComments : [];
+
+      // Get replies for each main comment (first 3 replies each)
+      const commentsWithReplies = await Promise.all(
+        mainCommentsArray.map(async (comment: any) => {
+          const { data: replies } = await supabaseAdmin.rpc("get_comment_replies", {
+            p_email: email.toLowerCase().trim(),
+            p_comment_id: comment.id,
+            p_limit: 3,
+            p_offset: 0,
+          });
+
+          const repliesResult = Array.isArray(replies) ? replies[0] : replies;
+
+          return {
+            ...comment,
+            replies: {
+              items: repliesResult?.replies || [],
+              has_more: repliesResult?.has_more || false,
+              total_count: repliesResult?.total_count || 0,
+            },
+          };
+        })
+      );
+
+      comments = commentsWithReplies;
 
       // Get total count of top-level comments for pagination
       const { count: totalCount } = await supabaseAdmin

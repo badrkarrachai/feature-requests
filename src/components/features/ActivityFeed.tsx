@@ -33,6 +33,7 @@ import {
   Loader2,
   Edit,
   Trash2,
+  Star,
 } from "lucide-react";
 import { STATUS_TEXT } from "@/lib/utils/index";
 import type { Activity, Comment } from "@/types";
@@ -66,9 +67,9 @@ const LoadMoreIndicator = ({ isVisible }: { isVisible: boolean }) => {
 
   return (
     <div className="flex items-center justify-center py-6">
-      <div className="flex items-center space-x-3 px-4 py-2 rounded-full bg-gray-50 border border-gray-200">
+      <div className="flex items-center space-x-3 px-4 py-2 rounded-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-600/50">
         <LoadingSpinner size="sm" className="text-blue-600" />
-        <span className="text-sm text-gray-600 font-medium">Loading more comments...</span>
+        <span className="text-sm text-gray-600 dark:text-gray-300 font-medium">Loading more comments...</span>
       </div>
     </div>
   );
@@ -80,13 +81,13 @@ const EndOfListIndicator = ({ show, count }: { show: boolean; count: number }) =
   return (
     <div className="flex items-center justify-center py-8">
       <div className="flex flex-col items-center space-y-2">
-        <div className="w-12 h-12 rounded-full bg-gradient-to-br from-green-100 to-blue-100 flex items-center justify-center">
+        <div className="w-12 h-12 rounded-full bg-gradient-to-br from-green-100 to-blue-100 dark:from-green-800 dark:to-blue-800 flex items-center justify-center">
           <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
           </svg>
         </div>
-        <div className="text-sm font-medium text-gray-700">You're all caught up!</div>
-        <div className="text-xs text-gray-500">You've seen all {count} comments</div>
+        <div className="text-sm font-medium text-gray-700 dark:text-gray-300">You're all caught up!</div>
+        <div className="text-xs text-gray-500 dark:text-gray-400">You've seen all {count} comments</div>
       </div>
     </div>
   );
@@ -96,9 +97,12 @@ interface ActivityFeedProps {
   featureId: string;
   email: string;
   name: string;
+  appSlug: string;
+  urlImage?: string;
   initialComments?: any[];
   initialCommentsMetadata?: { total: number; hasMore: boolean };
   onAddComment?: (addCommentFn: (comment: any) => void) => void;
+  isAdmin?: boolean;
 }
 
 // Sort configuration
@@ -113,7 +117,17 @@ const sortConfig = {
   },
 };
 
-export default function ActivityFeed({ featureId, email, name, initialComments = [], initialCommentsMetadata, onAddComment }: ActivityFeedProps) {
+export default function ActivityFeed({
+  featureId,
+  email,
+  name,
+  appSlug,
+  urlImage,
+  initialComments = [],
+  initialCommentsMetadata,
+  onAddComment,
+  isAdmin = false,
+}: ActivityFeedProps) {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -148,6 +162,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         author_name: newComment.author_name,
         author_email: newComment.author_email,
         author_image_url: newComment.author_image_url,
+        author_role: newComment.author_role,
         is_deleted: newComment.is_deleted || false,
         likes_count: newComment.likes_count || 0,
         replies_count: newComment.replies_count || 0,
@@ -188,6 +203,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         author_name: newReply.author_name,
         author_email: newReply.author_email,
         author_image_url: newReply.author_image_url,
+        author_role: newReply.author_role,
         is_deleted: newReply.is_deleted || false,
         likes_count: newReply.likes_count || 0,
         replies_count: newReply.replies_count || 0,
@@ -279,9 +295,9 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         const currentReplyCount = getAllRepliesInThread(commentId).length;
 
         const res = await fetch(
-          `/api/features/${featureId}/comments/${commentId}/replies?email=${encodeURIComponent(email)}&name=${encodeURIComponent(
-            name
-          )}&offset=${currentReplyCount}&limit=10`
+          `/api/features/${featureId}/comments/${commentId}/replies?app_slug=${encodeURIComponent(appSlug)}&email=${encodeURIComponent(
+            email
+          )}&name=${encodeURIComponent(name)}&offset=${currentReplyCount}&limit=10`
         );
 
         if (!res.ok) {
@@ -291,21 +307,30 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         const data = await res.json();
 
         // Convert new replies to activity format
-        const newReplyActivities: Activity[] = (data.replies || []).map((reply: Comment & { user_has_liked?: boolean }) => ({
-          id: reply.id,
-          type: "comment" as const,
-          content: reply.content,
-          created_at: reply.created_at,
-          author_name: reply.author_name,
-          author_email: reply.author_email,
-          author_image_url: reply.author_image_url,
-          is_deleted: reply.is_deleted,
-          likes_count: reply.likes_count,
-          replies_count: reply.replies_count,
-          edited_at: reply.edited_at,
-          user_has_liked: reply.user_has_liked || false,
-          parent_comment_id: reply.parent_id || commentId, // Use reply.parent_id or fallback to commentId
-        }));
+        const newReplyActivities: Activity[] = (data.replies || []).map((reply: Comment & { user_has_liked?: boolean }) => {
+          // DEBUG: Check like status fields
+          console.log(`DEBUG - Reply ${reply.id} like status:`, {
+            user_has_liked: reply.user_has_liked,
+            finalLikeStatus: reply.user_has_liked || false,
+          });
+
+          return {
+            id: reply.id,
+            type: "comment" as const,
+            content: reply.content,
+            created_at: reply.created_at,
+            author_name: reply.author_name,
+            author_email: reply.author_email,
+            author_image_url: reply.author_image_url,
+            author_role: reply.author_role,
+            is_deleted: reply.is_deleted,
+            likes_count: reply.likes_count,
+            replies_count: reply.replies_count,
+            edited_at: reply.edited_at,
+            user_has_liked: reply.user_has_liked || false,
+            parent_comment_id: reply.parent_id || commentId, // Use reply.parent_id or fallback to commentId
+          };
+        });
 
         // Insert new replies after the main comment and any existing replies
         setActivities((prev) => {
@@ -360,7 +385,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
 
       try {
         const res = await fetch(
-          `/api/features/${featureId}/comments?email=${encodeURIComponent(email)}&name=${encodeURIComponent(
+          `/api/features/${featureId}/comments?app_slug=${encodeURIComponent(appSlug)}&email=${encodeURIComponent(email)}&name=${encodeURIComponent(
             name
           )}&sort=${sortBy}&limit=10&page=${pageNum}`,
           { cache: "no-store" }
@@ -423,6 +448,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                   author_name: reply.author_name,
                   author_email: reply.author_email,
                   author_image_url: reply.author_image_url,
+                  author_role: reply.author_role,
                   is_deleted: reply.is_deleted,
                   likes_count: reply.likes_count,
                   replies_count: reply.replies_count,
@@ -482,6 +508,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
             author_name: comment.author_name,
             author_email: comment.author_email,
             author_image_url: comment.author_image_url,
+            author_role: comment.author_role,
             is_deleted: comment.is_deleted,
             likes_count: comment.likes_count,
             replies_count: comment.replies_count,
@@ -502,6 +529,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                 author_name: reply.author_name,
                 author_email: reply.author_email,
                 author_image_url: reply.author_image_url,
+                author_role: reply.author_role,
                 is_deleted: reply.is_deleted,
                 likes_count: reply.likes_count,
                 replies_count: reply.replies_count,
@@ -621,13 +649,13 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
   const getActivityColor = (type: string) => {
     switch (type) {
       case "comment":
-        return "text-blue-600 bg-blue-50";
+        return "text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20";
       case "status_change":
-        return "text-green-600 bg-green-50";
+        return "text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20";
       case "vote":
-        return "text-red-600 bg-red-50";
+        return "text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20";
       default:
-        return "text-gray-600 bg-gray-50";
+        return "text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800";
     }
   };
 
@@ -648,18 +676,77 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
     });
   };
 
-  const getUserAvatar = (authorName: string, imageUrl?: string) => {
+  const getUserAvatar = (authorName: string, imageUrl?: string, authorRole?: string) => {
     if (imageUrl) {
-      return <img src={imageUrl} alt={authorName} className="w-8 h-8 rounded-full object-cover flex-shrink-0" />;
+      return (
+        <div className="relative flex-shrink-0">
+          <img src={imageUrl} alt={authorName} className="w-8 h-8 rounded-full object-cover" />
+          {authorRole === "admin" && (
+            <div className="absolute -bottom-0.5 -right-0.5 sm:-bottom-1 sm:-right-1">
+              <div className="w-4 h-4 sm:w-5 sm:h-5 bg-white dark:bg-gray-700 rounded-full flex items-center justify-center">
+                <div className="w-3 h-3 sm:w-4 sm:h-4 bg-primary rounded-full flex items-center justify-center">
+                  <Star className="w-2 h-2 sm:w-2.5 sm:h-2.5 text-white fill-current" />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
     }
 
     const initial = (authorName || "U").charAt(0).toUpperCase();
-    const colors = ["bg-red-500", "bg-blue-500", "bg-green-500", "bg-yellow-500", "bg-purple-500", "bg-pink-500", "bg-indigo-500", "bg-orange-500"];
+    const colors = [
+      "bg-red-500",
+      "bg-red-600",
+      "bg-blue-500",
+      "bg-blue-600",
+      "bg-green-500",
+      "bg-green-600",
+      "bg-yellow-500",
+      "bg-yellow-600",
+      "bg-purple-500",
+      "bg-purple-600",
+      "bg-pink-500",
+      "bg-pink-600",
+      "bg-indigo-500",
+      "bg-indigo-600",
+      "bg-orange-500",
+      "bg-orange-600",
+      "bg-teal-500",
+      "bg-teal-600",
+      "bg-cyan-500",
+      "bg-cyan-600",
+      "bg-lime-500",
+      "bg-lime-600",
+      "bg-emerald-500",
+      "bg-emerald-600",
+      "bg-rose-500",
+      "bg-rose-600",
+      "bg-violet-500",
+      "bg-violet-600",
+      "bg-fuchsia-500",
+      "bg-fuchsia-600",
+      "bg-amber-500",
+      "bg-amber-600",
+      "bg-sky-500",
+      "bg-sky-600",
+    ];
     const colorIndex = authorName.length % colors.length;
 
     return (
-      <div className={`w-8 h-8 ${colors[colorIndex]} rounded-full flex items-center justify-center flex-shrink-0`}>
-        <span className="text-white text-sm font-semibold">{initial}</span>
+      <div className="relative flex-shrink-0">
+        <div className={`w-8 h-8 ${colors[colorIndex]} rounded-full flex items-center justify-center`}>
+          <span className="text-white text-sm font-semibold">{initial}</span>
+        </div>
+        {authorRole === "admin" && (
+          <div className="absolute -bottom-0.5 -right-0.5 sm:-bottom-1 sm:-right-1">
+            <div className="w-4 h-4 sm:w-5 sm:h-5 bg-white dark:bg-gray-700 rounded-full flex items-center justify-center">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 bg-primary rounded-full flex items-center justify-center">
+                <Star className="w-2 h-2 sm:w-2.5 sm:h-2.5 text-white fill-current" />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -686,7 +773,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
       const res = await fetch(`/api/features/${featureId}/comments/${commentId}/like`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, name }),
+        body: JSON.stringify({ app_slug: appSlug, email, name, image_url: urlImage }),
       });
 
       if (!res.ok) {
@@ -715,12 +802,29 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
   const handleDeleteComment = async (commentId: string) => {
     setLoadingCommentId(commentId);
     try {
-      const res = await fetch(`/api/features/${featureId}/comments/${commentId}?email=${encodeURIComponent(email)}`, {
-        method: "DELETE",
-      });
+      let res;
 
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      if (isAdmin) {
+        // Use admin API for admin users - admin status is verified server-side
+        const { adminApi } = await import("@/services/adminApi");
+        const success = await adminApi.deleteComment(featureId, commentId);
+        if (!success) {
+          throw new Error("Failed to delete comment");
+        }
+        // Simulate successful response for admin API
+        res = { ok: true };
+      } else {
+        // Use regular API for regular users
+        res = await fetch(
+          `/api/features/${featureId}/comments/${commentId}?app_slug=${encodeURIComponent(appSlug)}&email=${encodeURIComponent(email)}`,
+          {
+            method: "DELETE",
+          }
+        );
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
       }
 
       // Update the UI to mark comment as deleted
@@ -759,20 +863,44 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
 
     setLoadingCommentId(commentId);
     try {
-      const res = await fetch(`/api/features/${featureId}/comments/${commentId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          content: editingContent.trim(),
-        }),
-      });
+      let data;
 
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      if (isAdmin) {
+        // Use admin API for admin users
+        const { adminApi } = await import("@/services/adminApi");
+        const success = await adminApi.editComment(featureId, commentId, editingContent.trim());
+        if (!success) {
+          throw new Error("Failed to edit comment");
+        }
+        // For admin API, we need to refetch the comment data
+        const res = await fetch(
+          `/api/features/${featureId}/comments/${commentId}?app_slug=${encodeURIComponent(appSlug)}&email=${encodeURIComponent(
+            email
+          )}&name=${encodeURIComponent(name)}`
+        );
+        if (res.ok) {
+          data = await res.json();
+        } else {
+          throw new Error("Failed to refetch comment data");
+        }
+      } else {
+        // Use regular API for regular users
+        const res = await fetch(`/api/features/${featureId}/comments/${commentId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            app_slug: appSlug,
+            email,
+            content: editingContent.trim(),
+          }),
+        });
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+
+        data = await res.json();
       }
-
-      const data = await res.json();
 
       // Update the UI with the edited comment
       setActivities((prev) =>
@@ -823,30 +951,30 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         return (
           <div key={comment.id} className="ml-11">
             <div className="flex items-start gap-3">
-              <div className="flex-shrink-0">{getUserAvatar(comment.author_name, comment.author_image_url)}</div>
+              <div className="flex-shrink-0">{getUserAvatar(comment.author_name, comment.author_image_url, comment.author_role)}</div>
 
               <div className="flex-1 min-w-0">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-1">
-                      <span className="font-semibold text-gray-900 text-sm capitalize">{comment.author_name}</span>
+                      <span className="font-semibold text-gray-900 dark:text-gray-100 text-sm capitalize">{comment.author_name}</span>
 
                       {comment.type === "status_change" && (
-                        <div className="text-xs text-gray-500">
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
                           marked this post as{" "}
                           <Badge variant="secondary" className="text-xs">
                             {STATUS_TEXT[comment.new_status || ""] || "Unknown"}
                           </Badge>
                         </div>
                       )}
-                      {comment.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
+                      {comment.type === "vote" && <span className="text-xs text-gray-500 dark:text-gray-400">upvoted this</span>}
                     </div>
 
                     {comment.is_deleted ? (
-                      <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
+                      <div className="text-sm text-gray-500 dark:text-gray-400 italic mt-1">This comment has been deleted</div>
                     ) : (
                       comment.content && (
-                        <div className="text-sm text-gray-700 mt-1 leading-relaxed">
+                        <div className="text-sm text-gray-700 dark:text-gray-300 mt-1 leading-relaxed">
                           {replyTarget && (
                             <span className="font-semibold text-gray-[#202020] rounded-xs bg-primary/20 px-1 py-[0.1rem] mr-1">
                               {replyTarget.author_name.charAt(0).toUpperCase() + replyTarget.author_name.slice(1)}
@@ -869,13 +997,15 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                                 }}
                               />
                               <div className="flex items-center gap-2">
-                                <Button size="sm" onClick={() => handleSaveEdit(comment.id)} className="h-7 text-xs">
+                                <Button size="lg" onClick={() => handleSaveEdit(comment.id)} className="h-8 text-xs text-white">
                                   Save
                                 </Button>
-                                <Button variant="ghost" size="sm" onClick={handleCancelEdit} className="h-7 text-xs">
+                                <Button variant="ghost" size="sm" onClick={handleCancelEdit} className="h-8 text-xs">
                                   Cancel
                                 </Button>
-                                <span className="hidden md:inline text-xs text-gray-400 ml-2">Ctrl+Enter to save, Esc to cancel</span>
+                                <span className="hidden md:inline text-xs text-gray-400 dark:text-gray-500 ml-2">
+                                  Ctrl+Enter to save, Esc to cancel
+                                </span>
                               </div>
                             </div>
                           ) : (
@@ -886,7 +1016,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                     )}
                   </div>
 
-                  {comment.author_email === email && (
+                  {(comment.author_email === email || isAdmin) && (
                     <div className="flex items-center gap-2 flex-shrink-0">
                       {loadingCommentId === comment.id ? (
                         <LoadingSpinner size="xs" className="text-gray-500" />
@@ -922,29 +1052,29 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-xs text-gray-500 h-6 !px-0 hover:bg-transparent hover:text-primary"
+                        className="text-xs text-gray-500 dark:text-gray-400 h-6 !px-0 hover:bg-transparent hover:text-primary"
                         onClick={() => handleToggleLike(comment.id)}
                       >
                         {comment.user_has_liked ? (
                           <HeartFillIcon className="w-2.5 h-2.5 mr-1 text-primary" />
                         ) : (
-                          <HeartIcon className="w-2.5 h-2.5 mr-1" />
+                          <HeartIcon className="w-2.5 h-2.5 mr-1 text-gray-500 dark:text-gray-400" />
                         )}
                         <span className={(comment.likes_count || 0) > 0 ? "inline-block animate-[slideInRight_0.3s_ease-out]" : ""}>
                           {(comment.likes_count || 0) > 0 && ((comment.likes_count || 0) === 1 ? "1 like" : `${comment.likes_count || 0} likes`)}
                         </span>
                       </Button>
-                      <span className="text-xs text-gray-400">•</span>
+                      <span className="text-xs text-gray-400 dark:text-gray-500">•</span>
                     </>
                   )}
-                  <span className="text-xs text-gray-500">{formatTimeAgo(comment.created_at)}</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">{formatTimeAgo(comment.created_at)}</span>
                   {comment.type === "comment" && !comment.is_deleted && (
                     <>
-                      <span className="text-xs text-gray-400">•</span>
+                      <span className="text-xs text-gray-400 dark:text-gray-500">•</span>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-xs text-gray-500 h-6 px-2"
+                        className="text-xs text-gray-500 dark:text-gray-400 h-6 px-2"
                         onClick={() => setReplyingTo(comment.id === replyingTo ? null : comment.id)}
                       >
                         {replyingTo === comment.id ? "Cancel" : "Reply"}
@@ -953,8 +1083,8 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                   )}
                   {comment.edited_at && (
                     <>
-                      <span className="text-xs text-gray-400">•</span>
-                      <span className="text-xs text-gray-400">edited</span>
+                      <span className="text-xs text-gray-400 dark:text-gray-500">•</span>
+                      <span className="text-xs text-gray-400 dark:text-gray-500">edited</span>
                     </>
                   )}
                 </div>
@@ -973,6 +1103,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                   onCommentAdded={handleReplyAdded}
                   isFocused={true}
                   isReply={true}
+                  appSlug={appSlug}
                 />
               </div>
             )}
@@ -988,32 +1119,32 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
       const isLastComment = index === comments.length - 1;
 
       return (
-        <div key={comment.id} className={`pb-4 ${!isLastComment ? "border-b border-gray-100" : ""}`}>
+        <div key={comment.id} className={`pb-4 ${!isLastComment ? "border-b border-gray-100 dark:border-gray-600/50" : ""}`}>
           {/* Main Comment */}
           <div className="flex items-start gap-3">
-            <div className="flex-shrink-0">{getUserAvatar(comment.author_name, comment.author_image_url)}</div>
+            <div className="flex-shrink-0">{getUserAvatar(comment.author_name, comment.author_image_url, comment.author_role)}</div>
 
             <div className="flex-1 min-w-0">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="font-semibold text-gray-900 text-sm capitalize">{comment.author_name}</span>
+                    <span className="font-semibold text-gray-900 dark:text-gray-100 text-sm capitalize">{comment.author_name}</span>
                     {comment.type === "status_change" && (
-                      <div className="text-xs text-gray-500">
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
                         marked this post as{" "}
                         <Badge variant="secondary" className="text-xs">
                           {STATUS_TEXT[comment.new_status || ""] || "Unknown"}
                         </Badge>
                       </div>
                     )}
-                    {comment.type === "vote" && <span className="text-xs text-gray-500">upvoted this</span>}
+                    {comment.type === "vote" && <span className="text-xs text-gray-500 dark:text-gray-400">upvoted this</span>}
                   </div>
 
                   {comment.is_deleted ? (
-                    <div className="text-sm text-gray-500 italic mt-1">This comment has been deleted</div>
+                    <div className="text-sm text-gray-500 dark:text-gray-400 italic mt-1">This comment has been deleted</div>
                   ) : (
                     comment.content && (
-                      <div className="text-sm text-gray-700 mt-1 leading-relaxed">
+                      <div className="text-sm text-gray-700 dark:text-gray-300 mt-1 leading-relaxed">
                         {editingCommentId === comment.id ? (
                           <div className="space-y-2">
                             <Textarea
@@ -1031,13 +1162,15 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                               }}
                             />
                             <div className="flex items-center gap-2">
-                              <Button size="lg" onClick={() => handleSaveEdit(comment.id)} className="h-8 text-xs text-white">
+                              <Button size="lg" onClick={() => handleSaveEdit(comment.id)} className="h-8 text-xs text-white dark:text-gray-900">
                                 Save
                               </Button>
                               <Button variant="ghost" size="sm" onClick={handleCancelEdit} className="h-8 text-xs">
                                 Cancel
                               </Button>
-                              <span className="hidden md:inline text-xs text-gray-400 ml-2">Ctrl+Enter to save, Esc to cancel</span>
+                              <span className="hidden md:inline text-xs text-gray-400 dark:text-gray-500 ml-2">
+                                Ctrl+Enter to save, Esc to cancel
+                              </span>
                             </div>
                           </div>
                         ) : (
@@ -1048,7 +1181,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                   )}
                 </div>
 
-                {comment.author_email === email && (
+                {(comment.author_email === email || isAdmin) && (
                   <div className="flex items-center gap-2 flex-shrink-0">
                     {loadingCommentId === comment.id ? (
                       <LoadingSpinner size="xs" className="text-gray-500" />
@@ -1096,13 +1229,13 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                         {(comment.likes_count || 0) > 0 && ((comment.likes_count || 0) === 1 ? "1 like" : `${comment.likes_count || 0} likes`)}
                       </span>
                     </Button>
-                    <span className="text-xs text-gray-400">•</span>
+                    <span className="text-xs text-gray-400 dark:text-gray-500">•</span>
                   </>
                 )}
                 <span className="text-xs text-gray-500">{formatTimeAgo(comment.created_at)}</span>
                 {comment.type === "comment" && !comment.is_deleted && (
                   <>
-                    <span className="text-xs text-gray-400">•</span>
+                    <span className="text-xs text-gray-400 dark:text-gray-500">•</span>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -1116,8 +1249,8 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
 
                 {comment.edited_at && (
                   <>
-                    <span className="text-xs text-gray-400">•</span>
-                    <span className="text-xs text-gray-400">edited</span>
+                    <span className="text-xs text-gray-400 dark:text-gray-500">•</span>
+                    <span className="text-xs text-gray-400 dark:text-gray-500">edited</span>
                   </>
                 )}
               </div>
@@ -1136,6 +1269,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                 onCommentAdded={handleReplyAdded}
                 isFocused={true}
                 isReply={true}
+                appSlug={appSlug}
               />
             </div>
           )}
@@ -1151,7 +1285,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                 size="sm"
                 onClick={() => handleLoadMoreReplies(comment.id)}
                 disabled={loadingMoreReplies === comment.id}
-                className="text-xs text-gray-500 hover:text-blue-600 h-6"
+                className="text-xs text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 h-6"
               >
                 {loadingMoreReplies === comment.id ? (
                   <>
@@ -1160,7 +1294,8 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
                   </>
                 ) : (
                   (() => {
-                    const remainingReplies = comment.replies_total_count! - allReplies.length;
+                    const remainingReplies = (comment.replies_total_count || 0) - allReplies.length;
+                    if (remainingReplies <= 0) return "Load more replies";
                     return remainingReplies > 10
                       ? "View 10 more replies"
                       : `View ${remainingReplies} more ${remainingReplies === 1 ? "reply" : "replies"}`;
@@ -1180,16 +1315,16 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <h3 className="text-base sm:text-base md:text-lg lg:text-lg font-semibold">Activity Feed</h3>
-            <div className="w-20 h-6 bg-gray-200 rounded animate-pulse" />
+            <div className="w-20 h-6 bg-gray-200 dark:bg-gray-700 rounded animate-pulse" />
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
           {[...Array(3)].map((_, i) => (
             <div key={i} className="flex items-start gap-3 animate-pulse">
-              <div className="w-8 h-8 bg-gray-200 rounded-full" />
+              <div className="w-8 h-8 bg-gray-200 dark:bg-gray-700 rounded-full" />
               <div className="flex-1 space-y-2">
-                <div className="w-3/4 h-4 bg-gray-200 rounded" />
-                <div className="w-1/2 h-3 bg-gray-200 rounded" />
+                <div className="w-3/4 h-4 bg-gray-200 dark:bg-gray-700 rounded" />
+                <div className="w-1/2 h-3 bg-gray-200 dark:bg-gray-700 rounded" />
               </div>
             </div>
           ))}
@@ -1228,7 +1363,7 @@ export default function ActivityFeed({ featureId, email, name, initialComments =
           <div className="flex items-center justify-between">
             <h3 className="text-base sm:text-base md:text-lg lg:text-lg font-semibold">Activity Feed</h3>
             <div className="flex items-center gap-2">
-              <span className="text-xs sm:text-sm text-gray-500">Sort by</span>
+              <span className="text-xs sm:text-sm text-gray-500 dark:text-gray-400">Sort by</span>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="sm" className="h-9 text-xs justify-between px-3">

@@ -1,15 +1,22 @@
 import { Suspense } from "react";
 import FeatureDetailContent from "@/components/features/FeatureDetailContent";
 
+// This would be a server component that can detect admin status
+async function getFeatureData(featureId: string, searchParams: any) {
+  // In a real implementation, you might want to check admin status here
+  // For now, we'll let the client component handle it
+  return null;
+}
+
 export default async function FeaturePage({
   params,
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ email?: string; name?: string }>;
+  searchParams: Promise<{ email?: string; name?: string; app_slug?: string; url_image?: string; admin_tab?: string; from?: string }>;
 }) {
   const { id } = await params;
-  const { email, name } = await searchParams;
+  const { email, name, app_slug, url_image, admin_tab, from } = await searchParams;
 
   return (
     <Suspense
@@ -40,7 +47,15 @@ export default async function FeaturePage({
         </div>
       }
     >
-      <FeatureDetailContent featureId={id} email={email || ""} name={name || ""} />
+      <FeatureDetailContent
+        featureId={id}
+        email={email || ""}
+        name={name || ""}
+        appSlug={app_slug || "default"}
+        urlImage={url_image}
+        adminTab={admin_tab}
+        from={from}
+      />
     </Suspense>
   );
 }

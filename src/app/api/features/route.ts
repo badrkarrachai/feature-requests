@@ -4,11 +4,15 @@ import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
 
 export const runtime = "nodejs";
 
-// GET /api/features?email=&q=&sort=trending|top|new&filter=all|open|planned|in_progress|done|mine&limit=10&page=1
+// GET /api/features?app_slug=&email=&name=&url_image=&q=&sort=trending|top|new&filter=all|open|planned|in_progress|done|mine&limit=10&page=1&mode=stats
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
+  const appSlug = searchParams.get("app_slug") || "default"; // Use 'default' app as per new schema
   const email = searchParams.get("email") || "";
+  const name = searchParams.get("name") || "";
+  const urlImage = searchParams.get("url_image") || null;
   const q = (searchParams.get("q") || "").trim();
+  const mode = searchParams.get("mode") || "list"; // Support 'stats' mode
 
   const sort = (searchParams.get("sort") || "") as "trending" | "top" | "new" | "";
   const filter = (searchParams.get("filter") || "all") as "all" | "open" | "under_review" | "planned" | "in_progress" | "done" | "mine";
@@ -17,9 +21,50 @@ export async function GET(req: NextRequest) {
   const page = Math.max(parseInt(searchParams.get("page") || "1", 10), 1);
   const from = (page - 1) * limit;
 
-  // Use enhanced RPC function with database-level pagination and filtering
+  // Ensure user exists/updates if email and name are provided
+  if (email && name) {
+    try {
+      await supabaseAdmin.rpc("ensure_user", {
+        p_email: email.toLowerCase().trim(),
+        p_name: name.trim().toLowerCase(),
+        p_image_url: urlImage,
+      });
+    } catch (error) {
+      console.error("Error ensuring user exists:", error);
+      // Continue with the request even if user creation fails
+    }
+  }
+
+  // Handle stats mode - return aggregated statistics instead of individual features
+  if (mode === "stats") {
+    try {
+      const { data: statsData, error } = await supabaseAdmin.rpc("get_features_stats", {
+        p_app_slug: appSlug.toLowerCase().trim(),
+      });
+
+      if (error) {
+        console.error("Error fetching features stats:", error);
+        return NextResponse.json({ error: "Failed to load features stats" }, { status: 500 });
+      }
+
+      // Return the stats data directly
+      return NextResponse.json(
+        statsData || {
+          totalFeatures: 0,
+          totalVotes: 0,
+          totalComments: 0,
+        }
+      );
+    } catch (error) {
+      console.error("Error in features stats API:", error);
+      return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    }
+  }
+
+  // Use the new optimized RPC function with app-scoped filtering [[memory:7238037]]
   try {
     const { data: rpcFeatures, error } = await supabaseAdmin.rpc("get_features_with_user_votes", {
+      p_app_slug: appSlug.toLowerCase().trim(),
       p_email: email.toLowerCase().trim(),
       p_search: q || null,
       p_sort: sort || "trending",
@@ -54,9 +99,10 @@ export async function GET(req: NextRequest) {
 }
 
 // POST /api/features
-// body: { title, description, email, name, image_url }
+// body: { app_slug, title, description, email, name, image_url }
 export async function POST(req: NextRequest) {
   let body: {
+    app_slug?: string;
     title?: string;
     description?: string;
     email?: string;
@@ -67,7 +113,8 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {}
 
-  const { title, description, email, name, image_url } = body as {
+  const { app_slug, title, description, email, name, image_url } = body as {
+    app_slug?: string;
     title?: string;
     description?: string;
     email?: string;
@@ -75,13 +122,18 @@ export async function POST(req: NextRequest) {
     image_url?: string;
   };
 
+  // Default to 'default' app per new schema, or get from URL params
+  const { searchParams } = new URL(req.url);
+  const finalAppSlug = app_slug || searchParams.get("app_slug") || "default";
+
   if (!email || !title || !description || !name) {
     console.log("email, name, title and description are required", email, name, title, description);
     return NextResponse.json({ error: "email, name, title and description are required" }, { status: 400 });
   }
 
-  // Use the create_feature RPC function which handles user creation and feature creation
+  // Use the create_feature RPC function which handles user creation and feature creation (Multi-App Support)
   const { data: feature, error } = await supabaseAdmin.rpc("create_feature", {
+    p_app_slug: finalAppSlug.toLowerCase().trim(),
     p_email: email.toLowerCase(),
     p_name: name.trim().toLowerCase(),
     p_image_url: image_url || null,

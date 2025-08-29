@@ -1,3 +1,12 @@
+export interface App {
+  id: string;
+  slug: string;
+  name: string;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AdminUser {
   id: string;
   name: string;
@@ -19,6 +28,9 @@ export interface FeatureRequest {
   author_name: string;
   author_email: string;
   created_at: string;
+  app_id: string;
+  app_slug: string;
+  app_name: string;
   votedByMe?: boolean;
 }
 
@@ -49,3 +61,10 @@ export interface LoginForm {
 }
 
 export type AdminTabType = "dashboard" | "features" | "admins";
+
+export interface AppSelectionState {
+  selectedAppId: string | null;
+  selectedAppSlug: string | null;
+  selectedAppName: string | null;
+  availableApps: App[];
+}
