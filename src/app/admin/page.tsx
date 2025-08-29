@@ -1,7 +1,7 @@
 "use client";
 
 import { BarChart3, FileText, LogOut, Shield, Users } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AdminDashboard } from "@/components/admin/AdminDashboard";
 import { AdminLogin } from "@/components/admin/AdminLogin";
@@ -26,6 +26,18 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { usePersistentAppSelection } from "@/hooks/usePersistentAppSelection";
+
+// Loading fallback component for Suspense
+function AdminLoadingFallback() {
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4" />
+        <p className="text-muted-foreground">Loading admin panel...</p>
+      </div>
+    </div>
+  );
+}
 
 function AdminContent() {
   const { isAuthenticated, currentAdmin, isLoading, logout } = useAdminAuth();
@@ -234,7 +246,9 @@ export default function AdminPage() {
   return (
     <DarkModeProvider>
       <AdminAuthProvider>
-        <AdminContent />
+        <Suspense fallback={<AdminLoadingFallback />}>
+          <AdminContent />
+        </Suspense>
       </AdminAuthProvider>
     </DarkModeProvider>
   );
