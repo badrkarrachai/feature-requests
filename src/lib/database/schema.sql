@@ -77,9 +77,6 @@ drop trigger if exists trg_apps_updated on public.apps;
 create trigger trg_apps_updated before update on public.apps
 for each row execute procedure public._apps_touch_updated_at();
 
-insert into public.apps (slug, name)
-values ('default', 'Default App')
-on conflict (slug) do nothing;
 
 -- --------------------------------------
 -- STATUSES lookup
