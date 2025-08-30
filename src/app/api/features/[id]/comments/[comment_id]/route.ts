@@ -1,8 +1,35 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/providers/supabaseAdmin";
-import { getUserIdByEmail, isRequesterAdmin } from "@/lib/utils/admin";
+import { getUserIdByEmail, isRequesterAdmin, getAdminUser } from "@/lib/utils/admin";
 
 export const runtime = "nodejs";
+
+// GET /api/features/[id]/comments/[comment_id] - Fetch a single comment (used after admin edits)
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string; comment_id: string }> }) {
+  const { comment_id: commentId } = await ctx.params;
+
+  try {
+    // Return the public view of the comment with author fields
+    const { data: comment, error } = await supabaseAdmin
+      .from("comments_public")
+      .select("*")
+      .eq("id", commentId)
+      .single();
+
+    if (error) {
+      if (error.code === "PGRST116") {
+        return NextResponse.json({ error: "Comment not found" }, { status: 404 });
+      }
+      console.error("Error fetching comment:", error);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ comment });
+  } catch (e) {
+    console.error("Error in GET /api/features/[id]/comments/[comment_id]:", e);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
 
 // DELETE /api/features/[id]/comments/[comment_id] - Soft delete comment by owner or admin
 export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string; comment_id: string }> }) {
@@ -10,34 +37,32 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
   const { searchParams } = new URL(req.url);
   const email = searchParams.get("email") || "";
 
-  if (!email) {
-    return NextResponse.json({ error: "email is required" }, { status: 400 });
-  }
-
   try {
     // Always check admin status server-side for security
     const isAdmin = await isRequesterAdmin();
 
     if (isAdmin) {
-      // Admin can delete any comment
-      const { data: success, error } = await supabaseAdmin.rpc("admin_delete_comment", {
-        p_comment_id: commentId,
-      });
+      // Admin soft-delete to preserve threading integrity
+      const { data: comment, error } = await supabaseAdmin
+        .from("comments")
+        .update({ is_deleted: true, content: "", deleted_at: new Date().toISOString() })
+        .eq("id", commentId)
+        .eq("is_deleted", false)
+        .select("id")
+        .single();
 
       if (error) {
-        console.error("Error admin deleting comment:", error);
+        if (error.code === "PGRST116") {
+          return NextResponse.json({ error: "Comment not found" }, { status: 404 });
+        }
+        console.error("Error admin soft-deleting comment:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
       }
-
-      if (!success) {
-        return NextResponse.json(
-          {
-            error: "Comment not found",
-          },
-          { status: 404 }
-        );
-      }
     } else {
+      // For non-admins, require email and delete only own comment
+      if (!email) {
+        return NextResponse.json({ error: "email is required" }, { status: 400 });
+      }
       // Regular user can only delete their own comments
       const { data: success, error } = await supabaseAdmin.rpc("soft_delete_comment_by_owner", {
         p_email: email.toLowerCase().trim(),

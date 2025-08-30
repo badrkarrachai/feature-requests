@@ -56,6 +56,22 @@ class AdminApi {
     return request;
   }
 
+  // Cache invalidation helpers
+  public invalidateByPrefix(prefix: string) {
+    for (const key of Array.from(this.cache.keys())) {
+      if (key.startsWith(prefix)) this.cache.delete(key);
+    }
+  }
+
+  public invalidateFeaturesCache() {
+    this.invalidateByPrefix("getFeatures");
+  }
+
+  public invalidateFeaturesStatsCache() {
+    this.invalidateByPrefix("getFeaturesStats");
+    this.invalidateByPrefix("getAdminStats");
+  }
+
   // Debug utility to check authentication state
   public debugAuthState(): void {
     if (typeof window === "undefined") {
