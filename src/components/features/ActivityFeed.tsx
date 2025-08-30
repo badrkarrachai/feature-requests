@@ -147,6 +147,28 @@ export default function ActivityFeed({
   const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState<string>("");
   const [loadingCommentId, setLoadingCommentId] = useState<string | null>(null);
+  const [authEmail, setAuthEmail] = useState<string | null>(null);
+
+  // Helper: who can manage a given comment (edit/delete)?
+  const canManageComment = useCallback(
+    (comment: any) => {
+      const jwtEmail = authEmail?.toLowerCase();
+      const urlEmail = email.toLowerCase();
+
+      if (isAdmin) {
+        // Admin can manage:
+        // - all items when JWT==URL (full control), or
+        // - only items authored by the URL email (scoped control) when JWT!=URL
+        if (!!jwtEmail && jwtEmail === urlEmail) return true;
+        return !!comment.author_email && comment.author_email.toLowerCase() === urlEmail;
+      }
+
+      // Normal user: allow using JWT if present; otherwise fall back to URL email
+      const effectiveEmail = (jwtEmail || urlEmail || "").toLowerCase();
+      return !!comment.author_email && comment.author_email.toLowerCase() === effectiveEmail;
+    },
+    [authEmail, email, isAdmin]
+  );
 
   // Request tracking for race condition protection
   const requestIdRef = useRef(0);
@@ -332,28 +354,34 @@ export default function ActivityFeed({
           };
         });
 
-        // Insert new replies after the main comment and any existing replies
+        // Insert new replies after the main comment and all existing descendants (stable against index drift)
         setActivities((prev) => {
           const newActivities = [...prev];
 
-          // Find where to insert the new replies
-          let insertIndex = mainCommentIndex + 1;
+          const currentMainIndex = newActivities.findIndex((a) => a.id === commentId);
+          if (currentMainIndex === -1) return prev; // main comment not found
 
-          // Skip over any existing replies to this comment
-          while (insertIndex < newActivities.length && newActivities[insertIndex].parent_comment_id === commentId) {
+          // Find insertion point after the last descendant in this thread
+          let insertIndex = currentMainIndex + 1;
+          const isDescendantOf = (activity: Activity, ancestorId: string): boolean => {
+            if (activity.parent_comment_id === ancestorId) return true;
+            if (!activity.parent_comment_id) return false;
+            const immediateParent = newActivities.find((a) => a.id === activity.parent_comment_id);
+            return immediateParent ? isDescendantOf(immediateParent, ancestorId) : false;
+          };
+
+          while (insertIndex < newActivities.length && isDescendantOf(newActivities[insertIndex], commentId)) {
             insertIndex++;
           }
 
-          // Insert new replies at the correct position
           newActivities.splice(insertIndex, 0, ...newReplyActivities);
 
-          // Update the main comment's replies_has_more flag and total count
-          const updatedMainComment = {
-            ...newActivities[mainCommentIndex],
+          // Update the main comment's replies flags from API response
+          newActivities[currentMainIndex] = {
+            ...newActivities[currentMainIndex],
             replies_has_more: data.has_more,
-            replies_total_count: data.total_count, // Update with latest total from API
+            replies_total_count: data.total_count,
           };
-          newActivities[mainCommentIndex] = updatedMainComment;
 
           return newActivities;
         });
@@ -372,6 +400,24 @@ export default function ActivityFeed({
       onAddComment(addCommentLocally);
     }
   }, [onAddComment, addCommentLocally]);
+
+  // Load authenticated user (from JWT) and store email for gating
+  useEffect(() => {
+    const loadMe = async () => {
+      try {
+        const res = await fetch("/api/auth/me", { cache: "no-store" });
+        const data = await res.json();
+        if (data && data.user && data.user.email) {
+          setAuthEmail(String(data.user.email).toLowerCase());
+        } else {
+          setAuthEmail(null);
+        }
+      } catch {
+        setAuthEmail(null);
+      }
+    };
+    loadMe();
+  }, []);
 
   // Load a specific page with race condition protection
   const fetchPage = useCallback(
@@ -827,14 +873,114 @@ export default function ActivityFeed({
         }
       }
 
-      // Update the UI to mark comment as deleted
-      setActivities((prev) => prev.map((activity) => (activity.id === commentId ? { ...activity, is_deleted: true, content: "" } : activity)));
+      // Mark the comment as deleted but KEEP it in the list as a tombstone immediately
+      // Also, if it's a reply, decrement the root main comment's replies_total_count now
+      setActivities((prev) => {
+        const next = prev.map((activity) => (activity.id === commentId ? { ...activity, is_deleted: true, content: "" } : activity));
+
+        // Find the deleted item to locate its root main ancestor
+        const deleted = next.find((a) => a.id === commentId);
+        if (!deleted) return next;
+
+        // Walk up the chain to the main comment (no parent_comment_id)
+        let ancestorId = deleted.parent_comment_id || null;
+        if (!ancestorId) return next; // was a main comment
+
+        let current = next.find((a) => a.id === ancestorId) || null;
+        while (current && current.parent_comment_id) {
+          current = next.find((a) => a.id === current!.parent_comment_id) || null;
+        }
+
+        if (current) {
+          const rootIndex = next.findIndex((a) => a.id === current!.id);
+          if (rootIndex !== -1) {
+            const currentTotal = (next[rootIndex] as any).replies_total_count || 0;
+            next[rootIndex] = {
+              ...next[rootIndex],
+              replies_total_count: Math.max(0, currentTotal - 1),
+            } as any;
+          }
+        }
+
+        return next;
+      });
 
       setOpenDropdownId(null); // Close dropdown
 
-      // Remove the comment from UI after 2 seconds
+      // After a short delay, remove the deleted comment AND its entire subtree
       setTimeout(() => {
-        setActivities((prev) => prev.filter((activity) => activity.id !== commentId));
+        setActivities((prev) => {
+          // Find the deleted item in the current list
+          const deleted = prev.find((a) => a.id === commentId);
+          if (!deleted) return prev;
+
+          // Helper to collect all descendant IDs of a node
+          const collectDescendants = (id: string, list: Activity[]): Set<string> => {
+            const toVisit: string[] = [id];
+            const result = new Set<string>();
+            while (toVisit.length) {
+              const cur = toVisit.pop() as string;
+              result.add(cur);
+              for (const item of list) {
+                if (item.parent_comment_id === cur) {
+                  toVisit.push(item.id);
+                }
+              }
+            }
+            return result;
+          };
+
+          const idsToRemove = collectDescendants(commentId, prev);
+
+          // If the deleted comment is a reply, adjust the root main's replies_total_count by the number removed
+          if (deleted.parent_comment_id) {
+            // Find root ancestor (main comment)
+            let current: Activity | undefined = deleted;
+            while (current && current.parent_comment_id) {
+              current = prev.find((a) => a.id === current!.parent_comment_id);
+            }
+            if (current) {
+              const rootIndex = prev.findIndex((a) => a.id === current!.id);
+              if (rootIndex !== -1) {
+                const removedCount = idsToRemove.size; // includes the deleted reply itself
+                const currentTotal = (prev[rootIndex] as any).replies_total_count || 0;
+                // Build new list then patch root node in the new list
+                const filtered = prev.filter((a) => !idsToRemove.has(a.id));
+                const idxInFiltered = filtered.findIndex((a) => a.id === current!.id);
+                if (idxInFiltered !== -1) {
+                  const newTotal = Math.max(0, currentTotal - removedCount);
+                  // Count currently loaded replies in filtered list for this thread
+                  const loadedReplies = filtered.filter((a) => {
+                    // walk up parents to see if descendant of current
+                    let p: Activity | undefined = a;
+                    while (p && p.parent_comment_id) {
+                      if (p.parent_comment_id === current!.id) return true;
+                      p = filtered.find((x) => x.id === p!.parent_comment_id);
+                    }
+                    return false;
+                  }).length;
+                  filtered[idxInFiltered] = {
+                    ...(filtered[idxInFiltered] as any),
+                    replies_total_count: newTotal,
+                    replies_has_more: loadedReplies < newTotal,
+                  } as any;
+                }
+                // Clear reply composer if it was targeting a removed id
+                if (replyingTo && idsToRemove.has(replyingTo)) {
+                  setReplyingTo(null);
+                }
+                return filtered;
+              }
+            }
+          }
+
+          // If it's a main comment, remove the entire thread
+          const filtered = prev.filter((a) => !idsToRemove.has(a.id));
+          if (replyingTo && idsToRemove.has(replyingTo)) {
+            setReplyingTo(null);
+          }
+          return filtered;
+        });
       }, 2000);
     } catch (error) {
       console.error("Error deleting comment:", error);
@@ -1016,7 +1162,7 @@ export default function ActivityFeed({
                     )}
                   </div>
 
-                  {(comment.author_email === email || isAdmin) && (
+                  {canManageComment(comment) && (
                     <div className="flex items-center gap-2 flex-shrink-0">
                       {loadingCommentId === comment.id ? (
                         <LoadingSpinner size="xs" className="text-gray-500" />
@@ -1181,7 +1327,7 @@ export default function ActivityFeed({
                   )}
                 </div>
 
-                {(comment.author_email === email || isAdmin) && (
+                {canManageComment(comment) && (
                   <div className="flex items-center gap-2 flex-shrink-0">
                     {loadingCommentId === comment.id ? (
                       <LoadingSpinner size="xs" className="text-gray-500" />

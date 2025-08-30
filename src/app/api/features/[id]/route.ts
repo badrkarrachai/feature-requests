@@ -299,6 +299,13 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     return NextResponse.json({ error: "Admin authentication required" }, { status: 403 });
   }
 
+  // Fetch author info before deletion for reliable notification fallback
+  const { data: preFeature } = await supabaseAdmin
+    .from("features")
+    .select("id, user_id, app_id, title")
+    .eq("id", id)
+    .single();
+
   // Use the admin RPC function for feature deletion
   const { data, error } = await supabaseAdmin.rpc("admin_delete_feature", {
     p_admin_id: adminUser.id,
@@ -315,6 +322,37 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
 
   if (!data) {
     return NextResponse.json({ error: "Feature not found or already deleted" }, { status: 404 });
+  }
+
+  // Best-effort: ensure author is notified even if DB trigger didn't fire for some reason
+  try {
+    if (preFeature && preFeature.user_id) {
+      // Check if a recent notification already exists to avoid duplicates
+      const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const { data: existing } = await supabaseAdmin
+        .from("notifications")
+        .select("id")
+        .eq("user_id", preFeature.user_id)
+        .eq("type", "feature_deleted")
+        .eq("app_id", preFeature.app_id)
+        .gte("created_at", fiveMinAgo)
+        .limit(1);
+
+      if ((!existing || existing.length === 0) && preFeature.app_id) {
+        await supabaseAdmin.from("notifications").insert({
+          user_id: preFeature.user_id,
+          app_id: preFeature.app_id,
+          type: "feature_deleted",
+          title: "Your feature request was removed",
+          message: "Removed by an admin.",
+          feature_id: null,
+          feature_title_snapshot: preFeature.title,
+          comment_id: null,
+        });
+      }
+    }
+  } catch (notifyErr) {
+    console.warn("Feature delete: fallback notify failed (non-fatal)", notifyErr);
   }
 
   return NextResponse.json({ success: true });
