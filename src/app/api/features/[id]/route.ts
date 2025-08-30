@@ -344,7 +344,7 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
           app_id: preFeature.app_id,
           type: "feature_deleted",
           title: "Your feature request was removed",
-          message: "Removed by an admin.",
+          message: `Your feature request **${preFeature.title || "your feature"}** was removed by an admin.`,
           feature_id: null,
           feature_title_snapshot: preFeature.title,
           comment_id: null,

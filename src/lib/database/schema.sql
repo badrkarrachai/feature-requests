@@ -394,6 +394,7 @@ where n.feature_id = f.id
 -- Indexes
 create index if not exists idx_notifications_user_id            on public.notifications(user_id);
 create index if not exists idx_notifications_user_read          on public.notifications(user_id, read) where read = false;
+create index if not exists idx_notifications_user_read_created  on public.notifications(user_id, read, created_at desc);
 create index if not exists idx_notifications_feature_id         on public.notifications(feature_id);
 create index if not exists idx_notifications_created_at         on public.notifications(created_at desc);
 create index if not exists idx_notifications_updated_at         on public.notifications(updated_at desc);
@@ -623,9 +624,15 @@ create or replace function public.create_feature(
 ) returns public.features
 language plpgsql security definer set search_path = public
 as $$
-declare v_user uuid; v_app_id uuid; v_row public.features;
+declare
+  v_user uuid;
+  v_app_id uuid;
+  v_row public.features;
+  v_title text;
+  v_description text;
 begin
-  if coalesce(p_title,'') = '' or coalesce(p_description,'') = '' then
+  -- normalize inputs and ensure non-empty after trim
+  if coalesce(trim(p_title),'') = '' or coalesce(trim(p_description),'') = '' then
     raise exception 'title and description are required';
   end if;
 
@@ -635,8 +642,12 @@ begin
   v_user := public.ensure_user(p_email, p_name, p_image_url);
   perform public.app_activate(v_user, false, v_app_id);
 
+  -- Capitalize only the first character of title and description (rest unchanged)
+  v_title := upper(left(trim(p_title), 1)) || substr(trim(p_title), 2);
+  v_description := upper(left(trim(p_description), 1)) || substr(trim(p_description), 2);
+
   insert into public.features (app_id, user_id, title, description)
-  values (v_app_id, v_user, p_title, p_description)
+  values (v_app_id, v_user, v_title, v_description)
   returning * into v_row;
 
   insert into public.votes (user_id, feature_id) values (v_user, v_row.id); -- auto-vote
@@ -791,12 +802,13 @@ create or replace function public.create_grouped_notification(
 ) returns uuid
 language plpgsql security definer set search_path = public
 as $$
-declare notification_id uuid; group_key_val text; existing record; actor_name text; v_app uuid;
+declare notification_id uuid; group_key_val text; existing record; actor_name text; v_app uuid; v_feature_title text;
 begin
   if p_feature_id is not null then
     select app_id into v_app from public.features where id = p_feature_id;
+    select title  into v_feature_title from public.features where id = p_feature_id;
   elsif p_comment_id is not null then
-    select f.app_id into v_app
+    select f.app_id, f.title into v_app, v_feature_title
     from public.comments c
     join public.features f on f.id = c.feature_id
     where c.id = p_comment_id;
@@ -826,11 +838,11 @@ begin
            updated_at      = now(),
            title           = p_title,
            message         = case p_type
-             when 'vote' then actor_name || ' and ' || existing.group_count || ' other people voted on your feature request'
-             when 'comment' then actor_name || ' and ' || existing.group_count || ' other people commented on your feature request'
-             when 'comment_like' then actor_name || ' and ' || existing.group_count || ' other people liked your comment'
-             when 'reply' then actor_name || ' and ' || existing.group_count || ' other people replied to your comment'
-             else actor_name || ' and ' || existing.group_count || ' other people interacted with your content'
+             when 'vote'         then actor_name || ' and ' || existing.group_count || ' other people voted on "' || coalesce(v_feature_title,'your feature') || '".'
+             when 'comment'      then actor_name || ' and ' || existing.group_count || ' other people commented on "' || coalesce(v_feature_title,'your feature') || '".'
+             when 'comment_like' then actor_name || ' and ' || existing.group_count || ' other people liked your comment on "' || coalesce(v_feature_title,'your feature') || '".'
+             when 'reply'        then actor_name || ' and ' || existing.group_count || ' other people replied to your comment on "' || coalesce(v_feature_title,'your feature') || '".'
+             else actor_name || ' and ' || existing.group_count || ' other people interacted with your content.'
            end,
            read            = false,
            read_at         = null
@@ -879,15 +891,16 @@ $$;
 -- status change / vote / delete / comment like / reply notifiers (unchanged logic)
 create or replace function public.notify_on_feature_status_change()
 returns trigger language plpgsql security definer set search_path = public as $$
-declare status_new text; status_old text; msg text;
+declare status_new text; status_old text; msg text; v_title text;
 begin
   if old.status_id = new.status_id then return new; end if;
   select label into status_new from public.statuses where id = new.status_id;
   select label into status_old from public.statuses where id = old.status_id;
+  v_title := new.title;
 
   msg := case
-    when status_old is not null then 'Your feature request moved by an admin from **' || status_old || '** to **' || coalesce(status_new,'(unknown)') || '**'
-    else 'Moved to **' || coalesce(status_new,'(unknown)') || '**'
+    when status_old is not null then 'Status for **' || coalesce(v_title,'your feature') || '** changed from ' || status_old || ' to ' || coalesce(status_new,'(unknown)') || '.'
+    else 'Status for **' || coalesce(v_title,'your feature') || '** changed to ' || coalesce(status_new,'(unknown)') || '.'
   end;
 
   perform public.create_notification(
@@ -904,14 +917,15 @@ $$;
 
 create or replace function public.notify_on_new_vote()
 returns trigger language plpgsql security definer set search_path = public as $$
-declare owner_id uuid;
+declare owner_id uuid; v_title text;
 begin
   select f.user_id into owner_id from public.features f where f.id = new.feature_id;
   if owner_id is null or owner_id = new.user_id then return new; end if;
+  select title into v_title from public.features where id = new.feature_id;
 
   perform public.create_grouped_notification(
     owner_id, 'vote', 'Someone voted on your feature request',
-    'New vote on your feature request', new.feature_id, null, new.user_id
+    'New vote on **' || coalesce(v_title,'your feature') || '**.', new.feature_id, null, new.user_id
   );
   return new;
 end;
@@ -927,7 +941,7 @@ begin
     old.app_id,
     'feature_deleted',
     'Your feature request was removed',
-    'Removed by an admin.',
+    'Your feature request **' || coalesce(old.title,'your feature') || '** was removed by an admin.',
     old.id,
     old.title
   );
@@ -937,16 +951,17 @@ $$;
 
 create or replace function public.notify_on_new_comment()
 returns trigger language plpgsql security definer set search_path = public as $$
-declare feature_owner_id uuid;
+declare feature_owner_id uuid; v_title text;
 begin
   if new.parent_id is not null then return new; end if; -- replies handled elsewhere
   select f.user_id into feature_owner_id from public.features f where f.id = new.feature_id;
   if feature_owner_id is null or feature_owner_id = new.user_id then return new; end if;
+  select title into v_title from public.features where id = new.feature_id;
 
   perform public.create_grouped_notification(
     feature_owner_id, 'comment',
     'Someone commented on your feature request',
-    'New comment on your feature request',
+    'New comment on **' || coalesce(v_title,'your feature') || '**.',
     new.feature_id, null, new.user_id
   );
   return new;
@@ -955,7 +970,7 @@ $$;
 
 create or replace function public.notify_on_comment_like()
 returns trigger language plpgsql security definer set search_path = public as $$
-declare comment_author_id uuid; v_feature_id uuid;
+declare comment_author_id uuid; v_feature_id uuid; v_title text;
 begin
   select c.user_id, c.feature_id into comment_author_id, v_feature_id
   from public.comments c where c.id = new.comment_id;
@@ -963,10 +978,11 @@ begin
   if comment_author_id is null or comment_author_id = new.user_id then
     return new;
   end if;
+  select title into v_title from public.features where id = v_feature_id;
 
   perform public.create_grouped_notification(
     comment_author_id, 'comment_like', 'Someone liked your comment',
-    'New like on your comment', v_feature_id, null, new.user_id
+    'New like on your comment on **' || coalesce(v_title,'your feature') || '**.', v_feature_id, null, new.user_id
   );
   return new;
 end;
@@ -974,7 +990,7 @@ $$;
 
 create or replace function public.notify_on_reply()
 returns trigger language plpgsql security definer set search_path = public as $$
-declare parent_author uuid; feature_id uuid;
+declare parent_author uuid; feature_id uuid; v_title text;
 begin
   if new.parent_id is null then return new; end if;
 
@@ -982,10 +998,11 @@ begin
   from public.comments c where c.id = new.parent_id;
 
   if parent_author is null or parent_author = new.user_id then return new; end if;
+  select title into v_title from public.features where id = feature_id;
 
   perform public.create_grouped_notification(
     parent_author, 'reply', 'Someone replied to your comment',
-    'New reply to your comment', feature_id, null, new.user_id
+    'New reply to your comment on **' || coalesce(v_title,'your feature') || '**.', feature_id, null, new.user_id
   );
   return new;
 end;
@@ -1061,7 +1078,7 @@ begin
   left join public.apps a on a.id = n.app_id
   where n.user_id = v_user_id
     and (p_app_slug is null or a.slug = p_app_slug)
-  order by n.read asc, n.updated_at desc
+  order by n.read asc, n.created_at desc, n.updated_at desc
   limit p_limit offset p_offset;
 end;
 $$;

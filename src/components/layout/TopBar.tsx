@@ -460,13 +460,7 @@ export default function TopBar(props: {
                                           <div className="flex-1 min-w-0">
                                             <p className="text-sm font-semibold text-foreground truncate leading-tight">{notification.title}</p>
                                             <p className="text-xs text-muted-foreground mt-1 line-clamp-2 leading-relaxed">
-                                              {renderBoldText(`${notification.message.charAt(0).toUpperCase()}${notification.message.slice(1)} `)}
-                                              {notification.feature_title && notification.type !== "status_change" && (
-                                                <>
-                                                  {(notification.type === "reply" || notification.type === "comment_like") && "on "}
-                                                  <span className="font-medium text-foreground/80">{notification.feature_title}</span>
-                                                </>
-                                              )}
+                                              {renderBoldText(`${notification.message.charAt(0).toUpperCase()}${notification.message.slice(1)}`)}
                                             </p>
                                             <p className="text-xs text-muted-foreground/70 mt-1.5 font-normal">
                                               {formatTimestamp(notification.updated_at)}
@@ -517,13 +511,7 @@ export default function TopBar(props: {
                                           <div className="flex-1 min-w-0">
                                             <p className="text-sm font-medium text-muted-foreground truncate leading-tight">{notification.title}</p>
                                             <p className="text-xs text-muted-foreground/70 mt-1 line-clamp-2 leading-relaxed">
-                                              {renderBoldText(`${notification.message.charAt(0).toUpperCase()}${notification.message.slice(1)} `)}
-                                              {notification.feature_title && notification.type !== "status_change" && (
-                                                <>
-                                                  {(notification.type === "reply" || notification.type === "comment_like") && "on "}
-                                                  <span className="font-medium text-muted-foreground/60">{notification.feature_title}</span>
-                                                </>
-                                              )}
+                                              {renderBoldText(`${notification.message.charAt(0).toUpperCase()}${notification.message.slice(1)}`)}
                                             </p>
                                             <p className="text-xs text-muted-foreground/50 mt-1.5 font-normal">
                                               {formatTimestamp(notification.updated_at)}
