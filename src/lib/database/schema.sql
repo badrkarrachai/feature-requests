@@ -327,7 +327,8 @@ create table if not exists public.notifications (
   type             text not null check (type in ('comment','status_change','feature_deleted','vote','comment_like','reply')),
   title            text not null,
   message          text not null,
-  feature_id       uuid references public.features(id) on delete cascade,       -- CHANGED to CASCADE
+  feature_id       uuid references public.features(id) on delete set null,
+  feature_title_snapshot text,
   comment_id       uuid,
   group_key        text,
   group_count      integer not null default 1,
@@ -352,6 +353,36 @@ drop trigger if exists trg_notifications_app_sync on public.notifications;
 create trigger trg_notifications_app_sync
 before insert or update on public.notifications
 for each row execute procedure public.notifications_set_app_from_feature();
+
+-- Ensure feature_title_snapshot column exists for existing deployments
+do $$ begin
+  begin
+    alter table public.notifications add column if not exists feature_title_snapshot text;
+  exception when others then null;
+  end;
+end $$;
+
+-- Ensure FK behavior is SET NULL in existing DBs
+do $$
+begin
+  if exists (
+    select 1 from information_schema.table_constraints
+    where constraint_schema = 'public'
+      and table_name = 'notifications'
+      and constraint_name = 'notifications_feature_id_fkey'
+  ) then
+    begin
+      alter table public.notifications drop constraint notifications_feature_id_fkey;
+    exception when others then null;
+    end;
+  end if;
+  begin
+    alter table public.notifications
+      add constraint notifications_feature_id_fkey foreign key (feature_id)
+      references public.features(id) on delete set null;
+  exception when others then null;
+  end;
+end $$;
 
 -- Backfill historical
 update public.notifications n
@@ -889,11 +920,16 @@ $$;
 create or replace function public.notify_on_feature_deleted()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
-  perform public.create_notification(
-    old.user_id, 'feature_deleted',
+  insert into public.notifications (
+    user_id, app_id, type, title, message, feature_id, feature_title_snapshot
+  ) values (
+    old.user_id,
+    old.app_id,
+    'feature_deleted',
     'Your feature request was removed',
     'Removed by an admin.',
-    old.id, null
+    old.id,
+    old.title
   );
   return old;
 end;
@@ -1014,7 +1050,7 @@ begin
     n.id, n.type, n.title, n.message, n.feature_id, n.comment_id,
     n.group_key, n.group_count,
     case when n.latest_actor_id is not null then u.name else null end as latest_actor_name,
-    case when n.feature_id is not null then f.title else null end as feature_title,
+    coalesce(n.feature_title_snapshot, f.title) as feature_title,
     a.slug as app_slug,
     n.read,
     to_char(n.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as created_at,
@@ -1281,7 +1317,7 @@ select
   n.latest_actor_id,
   (select u.name  from public.users u where u.id = n.latest_actor_id) as latest_actor_name,
   (select u.email from public.users u where u.id = n.latest_actor_id) as latest_actor_email,
-  (select f.title from public.features f where f.id = n.feature_id)   as feature_title,
+  coalesce(n.feature_title_snapshot, (select f.title from public.features f where f.id = n.feature_id)) as feature_title,
   n.read, n.created_at, n.updated_at
 from public.notifications n;
 

@@ -57,6 +57,7 @@ export default function FeatureDetailContent({
   const [commentsMetadata, setCommentsMetadata] = useState<{ total: number; hasMore: boolean } | null>(null);
   const [addCommentToFeed, setAddCommentToFeed] = useState<((comment: any) => void) | null>(null);
   const [isAdminUser, setIsAdminUser] = useState(isAdmin); // Use prop as initial value
+  const [authEmail, setAuthEmail] = useState<string | null>(null);
   const [currentAdminTab, setCurrentAdminTab] = useState(adminTab); // Track admin tab
 
   // Determine if user came from admin panel based on the 'from' parameter
@@ -102,6 +103,11 @@ export default function FeatureDetailContent({
       setError(null);
 
       try {
+        // Fetch authenticated user (from JWT) in parallel
+        const mePromise = fetch("/api/auth/me", { cache: "no-store" })
+          .then((r) => r.json())
+          .catch(() => ({ user: null }));
+
         const urlParams = new URLSearchParams({
           app_slug: appSlug,
           email: email,
@@ -123,8 +129,17 @@ export default function FeatureDetailContent({
           throw new Error("Failed to load feature request");
         }
 
-        const data = await res.json();
+        const [me, data] = await Promise.all([mePromise, res.json()]);
         setFeature(data);
+        // Update admin flag from API (verified via JWT on server)
+        if (typeof data.isAdmin === "boolean") {
+          setIsAdminUser(!!data.isAdmin);
+        }
+        if (me && me.user && me.user.email) {
+          setAuthEmail(me.user.email.toLowerCase());
+        } else {
+          setAuthEmail(null);
+        }
 
         // Update admin status based on API response
         if (data.isAdmin !== undefined) {
@@ -237,8 +252,16 @@ export default function FeatureDetailContent({
     }
   };
 
-  // Check if current user is the author of the feature
-  const isFeatureAuthor = feature && feature.author_email === email;
+  // Determine author: prefer JWT email; fall back to URL email for normal users who may not have JWT
+  const selfEmail = (authEmail || email || "").toLowerCase();
+  const isFeatureAuthor = !!(feature && feature.author_email && feature.author_email.toLowerCase() === selfEmail);
+
+  // Admin menus show only if admin AND JWT email matches URL email, to avoid cross-account leakage
+  const jwtMatchesUrl = !!authEmail && authEmail === email.toLowerCase();
+  const urlEmailLower = (email || "").toLowerCase();
+  const authorMatchesUrl = !!(feature && feature.author_email && feature.author_email.toLowerCase() === urlEmailLower);
+  // Admins: show if JWT==URL (full control) OR if the feature belongs to the URL user (scoped control to that user's items)
+  const canShowFeatureMenu = isFeatureAuthor || (isAdminUser && (jwtMatchesUrl || authorMatchesUrl));
 
   // Handle starting feature edit
   const handleStartEditFeature = () => {
@@ -353,6 +376,17 @@ export default function FeatureDetailContent({
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({ error: "Failed to delete feature" }));
         throw new Error(errorData.error || "Failed to delete feature");
+      }
+
+      // Invalidate admin caches so the deleted feature doesn't appear on return
+      try {
+        if (isAdminUser) {
+          const { adminApi } = await import("@/services/adminApi");
+          adminApi.invalidateFeaturesCache();
+          adminApi.invalidateFeaturesStatsCache();
+        }
+      } catch (e) {
+        // non-fatal
       }
 
       // Navigate back to features list after successful deletion
@@ -583,8 +617,8 @@ export default function FeatureDetailContent({
                         )}
                       </div>
 
-                      {/* Show edit/delete options for feature author OR admin */}
-                      {(isFeatureAuthor || isAdminUser) && (
+                      {/* Show edit/delete options for admins only and only when JWT email matches URL email */}
+                      {canShowFeatureMenu && (
                         <div className="flex items-center gap-2 flex-shrink-0">
                           {isUpdatingFeature || isDeletingFeature ? (
                             <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
