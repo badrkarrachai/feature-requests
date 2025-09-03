@@ -31,7 +31,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string;
   }
 }
 
-// DELETE /api/features/[id]/comments/[comment_id] - Soft delete comment by owner or admin
+// DELETE /api/features/[id]/comments/[comment_id] - Hard delete comment by owner or admin
 export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string; comment_id: string }> }) {
   const { id: featureId, comment_id: commentId } = await ctx.params;
   const { searchParams } = new URL(req.url);
@@ -42,35 +42,38 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     const isAdmin = await isRequesterAdmin();
 
     if (isAdmin) {
-      // Admin soft-delete to preserve threading integrity
-      const { data: comment, error } = await supabaseAdmin
-        .from("comments")
-        .update({ is_deleted: true, content: "", deleted_at: new Date().toISOString() })
-        .eq("id", commentId)
-        .eq("is_deleted", false)
-        .select("id")
-        .single();
+      // Admin: delete entire comment subtree
+      const admin = await getAdminUser();
+      if (!admin) {
+        return NextResponse.json({ error: "Admin access required" }, { status: 403 });
+      }
+
+      const { data: success, error } = await supabaseAdmin.rpc("admin_delete_comment_tree", {
+        p_admin_id: admin.id,
+        p_comment_id: commentId,
+      });
 
       if (error) {
-        if (error.code === "PGRST116") {
-          return NextResponse.json({ error: "Comment not found" }, { status: 404 });
-        }
-        console.error("Error admin soft-deleting comment:", error);
+        console.error("Error admin deleting comment tree:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+
+      if (!success) {
+        return NextResponse.json({ error: "Comment not found" }, { status: 404 });
       }
     } else {
       // For non-admins, require email and delete only own comment
       if (!email) {
         return NextResponse.json({ error: "email is required" }, { status: 400 });
       }
-      // Regular user can only delete their own comments
-      const { data: success, error } = await supabaseAdmin.rpc("soft_delete_comment_by_owner", {
+      // Regular user deletes their comment and all its replies (hard delete)
+      const { data: success, error } = await supabaseAdmin.rpc("delete_comment_tree_by_owner", {
         p_email: email.toLowerCase().trim(),
         p_comment_id: commentId,
       });
 
       if (error) {
-        console.error("Error soft deleting comment:", error);
+        console.error("Error deleting comment:", error);
 
         // Handle specific error cases
         if (error.message.includes("user not found")) {
