@@ -844,8 +844,10 @@ export default function ActivityFeed({
     }
   };
 
-  // Handle comment deletion
+  // Handle comment deletion (hard delete subtree; remove immediately)
   const handleDeleteComment = async (commentId: string) => {
+    // Determine if this is a reply (has a parent) using current state snapshot
+    const wasReply = !!activities.find((a) => a.id === commentId)?.parent_comment_id;
     setLoadingCommentId(commentId);
     try {
       let res;
@@ -873,115 +875,55 @@ export default function ActivityFeed({
         }
       }
 
-      // Mark the comment as deleted but KEEP it in the list as a tombstone immediately
-      // Also, if it's a reply, decrement the root main comment's replies_total_count now
+      // Remove the comment and its entire subtree immediately (backend hard-deletes subtree)
       setActivities((prev) => {
-        const next = prev.map((activity) => (activity.id === commentId ? { ...activity, is_deleted: true, content: "" } : activity));
-
-        // Find the deleted item to locate its root main ancestor
-        const deleted = next.find((a) => a.id === commentId);
-        if (!deleted) return next;
-
-        // Walk up the chain to the main comment (no parent_comment_id)
-        let ancestorId = deleted.parent_comment_id || null;
-        if (!ancestorId) return next; // was a main comment
-
-        let current = next.find((a) => a.id === ancestorId) || null;
-        while (current && current.parent_comment_id) {
-          current = next.find((a) => a.id === current!.parent_comment_id) || null;
-        }
-
-        if (current) {
-          const rootIndex = next.findIndex((a) => a.id === current!.id);
-          if (rootIndex !== -1) {
-            const currentTotal = (next[rootIndex] as any).replies_total_count || 0;
-            next[rootIndex] = {
-              ...next[rootIndex],
-              replies_total_count: Math.max(0, currentTotal - 1),
-            } as any;
+        // Build set of ids to remove: the node and all descendants
+        const toVisit: string[] = [commentId];
+        const removeIds = new Set<string>();
+        while (toVisit.length) {
+          const cur = toVisit.pop() as string;
+          if (removeIds.has(cur)) continue;
+          removeIds.add(cur);
+          for (const item of prev) {
+            if (item.parent_comment_id === cur) toVisit.push(item.id);
           }
         }
 
-        return next;
+        // Adjust replies_total_count on the root main comment if deleting a reply subtree
+        let updated = [...prev];
+        if (wasReply) {
+          // Find the deleted item and walk up to the main ancestor
+          const deleted = updated.find((a) => a.id === commentId);
+          if (deleted) {
+            let current = updated.find((a) => a.id === deleted.parent_comment_id || "");
+            while (current && current.parent_comment_id) {
+              current = updated.find((a) => a.id === current!.parent_comment_id || "");
+            }
+            if (current) {
+              const rootIndex = updated.findIndex((a) => a.id === current!.id);
+              if (rootIndex !== -1) {
+                const currentTotal = (updated[rootIndex] as any).replies_total_count || 0;
+                const removedCount = removeIds.size; // total nodes removed under this main thread
+                updated[rootIndex] = {
+                  ...updated[rootIndex],
+                  replies_total_count: Math.max(0, currentTotal - removedCount),
+                } as any;
+              }
+            }
+          }
+        }
+
+        // Clear reply composer if targeting removed id
+        if (replyingTo && removeIds.has(replyingTo)) {
+          setReplyingTo(null);
+        }
+
+        // Filter out all removed ids
+        updated = updated.filter((a) => !removeIds.has(a.id));
+        return updated;
       });
 
       setOpenDropdownId(null); // Close dropdown
-
-      // After a short delay, remove the deleted comment AND its entire subtree
-      setTimeout(() => {
-        setActivities((prev) => {
-          // Find the deleted item in the current list
-          const deleted = prev.find((a) => a.id === commentId);
-          if (!deleted) return prev;
-
-          // Helper to collect all descendant IDs of a node
-          const collectDescendants = (id: string, list: Activity[]): Set<string> => {
-            const toVisit: string[] = [id];
-            const result = new Set<string>();
-            while (toVisit.length) {
-              const cur = toVisit.pop() as string;
-              result.add(cur);
-              for (const item of list) {
-                if (item.parent_comment_id === cur) {
-                  toVisit.push(item.id);
-                }
-              }
-            }
-            return result;
-          };
-
-          const idsToRemove = collectDescendants(commentId, prev);
-
-          // If the deleted comment is a reply, adjust the root main's replies_total_count by the number removed
-          if (deleted.parent_comment_id) {
-            // Find root ancestor (main comment)
-            let current: Activity | undefined = deleted;
-            while (current && current.parent_comment_id) {
-              current = prev.find((a) => a.id === current!.parent_comment_id);
-            }
-            if (current) {
-              const rootIndex = prev.findIndex((a) => a.id === current!.id);
-              if (rootIndex !== -1) {
-                const removedCount = idsToRemove.size; // includes the deleted reply itself
-                const currentTotal = (prev[rootIndex] as any).replies_total_count || 0;
-                // Build new list then patch root node in the new list
-                const filtered = prev.filter((a) => !idsToRemove.has(a.id));
-                const idxInFiltered = filtered.findIndex((a) => a.id === current!.id);
-                if (idxInFiltered !== -1) {
-                  const newTotal = Math.max(0, currentTotal - removedCount);
-                  // Count currently loaded replies in filtered list for this thread
-                  const loadedReplies = filtered.filter((a) => {
-                    // walk up parents to see if descendant of current
-                    let p: Activity | undefined = a;
-                    while (p && p.parent_comment_id) {
-                      if (p.parent_comment_id === current!.id) return true;
-                      p = filtered.find((x) => x.id === p!.parent_comment_id);
-                    }
-                    return false;
-                  }).length;
-                  filtered[idxInFiltered] = {
-                    ...(filtered[idxInFiltered] as any),
-                    replies_total_count: newTotal,
-                    replies_has_more: loadedReplies < newTotal,
-                  } as any;
-                }
-                // Clear reply composer if it was targeting a removed id
-                if (replyingTo && idsToRemove.has(replyingTo)) {
-                  setReplyingTo(null);
-                }
-                return filtered;
-              }
-            }
-          }
-
-          // If it's a main comment, remove the entire thread
-          const filtered = prev.filter((a) => !idsToRemove.has(a.id));
-          if (replyingTo && idsToRemove.has(replyingTo)) {
-            setReplyingTo(null);
-          }
-          return filtered;
-        });
-      }, 2000);
     } catch (error) {
       console.error("Error deleting comment:", error);
       // TODO: Add error handling UI (toast/alert)

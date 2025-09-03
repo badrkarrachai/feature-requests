@@ -728,10 +728,53 @@ declare v_user uuid; v_cnt int;
 begin
   select id into v_user from public.users where email = lower(trim(p_email));
   if v_user is null then raise exception 'user not found'; end if;
-  perform public.app_activate(v_user, false, null);
+  -- elevate within function to satisfy delete RLS for descendant rows
+  perform public.app_activate(v_user, true, null);
 
   delete from public.comments where id = p_comment_id and user_id = v_user;
   get diagnostics v_cnt = row_count;
+  return v_cnt > 0;
+end;
+$$;
+
+-- Hard delete a comment and all its descendants by owner (children first)
+create or replace function public.delete_comment_tree_by_owner(
+  p_email      text,
+  p_comment_id uuid
+) returns boolean
+language plpgsql security definer set search_path = public
+as $$
+declare v_user uuid; v_cnt int; v_root_owner uuid; v_last int;
+begin
+  select id into v_user from public.users where email = lower(trim(p_email));
+  if v_user is null then raise exception 'user not found'; end if;
+  -- don't elevate yet; first confirm ownership of the root
+
+  -- Ensure the requester owns the root comment
+  select user_id into v_root_owner from public.comments where id = p_comment_id;
+  if v_root_owner is null then return false; end if;
+  if v_root_owner <> v_user then return false; end if;
+
+  -- Now elevate to admin within function to remove descendants under RLS
+  perform public.app_activate(v_user, true, null);
+
+  -- Collect descendants (including root)
+  with recursive tree as (
+    select id, parent_id from public.comments where id = p_comment_id
+    union all
+    select c.id, c.parent_id from public.comments c
+    join tree t on c.parent_id = t.id
+  )
+  -- 1) delete children (non-root)
+  delete from public.comments
+  where id in (select id from tree where id <> p_comment_id);
+
+  get diagnostics v_cnt = row_count;
+
+  -- 2) delete root
+  delete from public.comments where id = p_comment_id and user_id = v_user;
+  get diagnostics v_last = row_count;
+  v_cnt := v_cnt + v_last;
   return v_cnt > 0;
 end;
 $$;
@@ -1647,6 +1690,43 @@ begin
 end;
 $$;
 
+-- Admin: hard delete a comment and all its descendants (children first)
+create or replace function public.admin_delete_comment_tree(
+  p_admin_id  uuid,
+  p_comment_id uuid
+) returns boolean
+language plpgsql security definer set search_path = public
+as $$
+declare v_cnt int; v_last int;
+begin
+  if not exists (select 1 from public.users where id = p_admin_id and role = 'admin') then
+    raise exception 'invalid admin user';
+  end if;
+
+  perform public.app_activate(p_admin_id, true, null);
+
+  with recursive tree as (
+    select id, parent_id from public.comments where id = p_comment_id
+    union all
+    select c.id, c.parent_id from public.comments c
+    join tree t on c.parent_id = t.id
+  )
+  delete from public.comments
+  where id in (
+    -- delete children first
+    select id from tree where id <> p_comment_id
+  );
+
+  get diagnostics v_cnt = row_count;
+
+  delete from public.comments where id = p_comment_id;
+  get diagnostics v_last = row_count;
+  v_cnt := v_cnt + v_last;
+
+  return v_cnt > 0;
+end;
+$$;
+
 -- --------------------------------------
 -- Convenience wrappers: admin actions by email+password
 -- --------------------------------------
@@ -1789,6 +1869,7 @@ begin
     public.toggle_vote(text,text,text,uuid),
     public.add_comment(text,text,text,uuid,text,uuid),
     public.delete_comment_by_owner(text,uuid),
+    public.delete_comment_tree_by_owner(text,uuid),
     public.soft_delete_comment_by_owner(text,uuid),
     public.toggle_comment_like(text,text,text,uuid),
     public.list_notifications(text,integer,integer),
@@ -1808,6 +1889,7 @@ begin
     public.admin_delete_feature(uuid,uuid),
     public.admin_edit_comment(uuid,uuid,text),
     public.admin_delete_comment(uuid,uuid),
+    public.admin_delete_comment_tree(uuid,uuid),
     public.admin_update_feature_status_by_email(text,text,uuid,text),
     public.admin_edit_feature_by_email(text,text,uuid,text,text,text),
     public.admin_delete_feature_by_email(text,text,uuid),
